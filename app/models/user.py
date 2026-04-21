@@ -34,6 +34,12 @@ class UserInDB(BaseModel):
     first_name: str
     last_name: str
     company: Optional[str] = None
+    phone_number: str
+    city: str
+    street_address: str
+    zip: str
+    state_province: str
+    country: str
 
 class Token(BaseModel):
     access_token: str

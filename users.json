@@ -1,0 +1,19 @@
+{
+    "testuser@example.com": {
+        "user": {
+            "id": "1",
+            "spire_customer_no": "W9cb40a98c",
+            "email": "testuser@example.com",
+            "first_name": "Test",
+            "last_name": "User",
+            "company": "Test Company",
+            "phone_number": "+541112345678",
+            "city": "Buenos Aires",
+            "street_address": "Av. Siempre Viva 742",
+            "zip": "1708",
+            "state_province": "Buenos Aires",
+            "country": "Argentina"
+        },
+        "hashed_password": "$2b$12$vJz1Vts1kLyyjvvOJaHjXesVxQApSDpC4ublfvuKD4AYI6yrT/B8q"
+    }
+}

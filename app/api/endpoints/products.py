@@ -7,8 +7,18 @@ from typing import Optional
 router = APIRouter()
 
 @router.get("/")
-async def get_products(limit: int = 100, start: int = 0):
-    return await spire_client.get_products(limit=limit, start=start)
+async def get_products(limit: int = 100, start: int = 0, group: Optional[str] = None, department: Optional[str] = None):
+    return await spire_client.get_products(limit=limit, start=start, group_no=group, department_code=department)
+
+@router.get("/categories")
+async def get_categories():
+    # En Spire las categorias suelen ser los "Inventory Groups"
+    return await spire_client.get_inventory_groups()
+    
+@router.get("/departments")
+async def get_departments():
+    # Alternativamente, departamentos más amplios
+    return await spire_client.get_sales_departments()
 
 @router.get("/{product_id}")
 async def get_product(product_id: str):
@@ -26,5 +36,6 @@ async def get_special_pricing(product_id: str, current_user: UserInDB = Depends(
 
 @router.get("/deals/all")
 async def get_deals():
-    # Placeholder for deals logic. Could be a specific field in Spire or a hardcoded category.
-    return {"message": "Deals will be listed here"}
+    # Obtiene todas las ofertas activas desde Spire
+    deals = await spire_client.get_deals()
+    return deals

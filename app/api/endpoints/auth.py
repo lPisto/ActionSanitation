@@ -6,13 +6,29 @@ from app.core.security import verify_password, get_password_hash, create_access_
 from app.services.spire_client import spire_client
 import uuid
 
+import json
+import os
+
 router = APIRouter()
 
 oauth2_scheme = OAuth2PasswordBearer(tokenUrl="/api/auth/login")
 
-# In a real application, you would use a real database. 
-# Here we just use a mock DB for demonstration purposes.
-fake_users_db = {}
+USERS_FILE = "users.json"
+
+def load_users():
+    if os.path.exists(USERS_FILE):
+        with open(USERS_FILE, "r") as f:
+            try:
+                return json.load(f)
+            except json.JSONDecodeError:
+                return {}
+    return {}
+
+def save_users(db):
+    with open(USERS_FILE, "w") as f:
+        json.dump(db, f, indent=4)
+
+fake_users_db = load_users()
 
 def truncate(value: str, max_length: int):
     return value[:max_length] if value else value
@@ -61,13 +77,21 @@ async def register(user_in: UserCreate):
         email=user_in.email,
         first_name=user_in.first_name,
         last_name=user_in.last_name,
-        company=user_in.company
+        company=user_in.company,
+        phone_number=user_in.phone_number,
+        city=user_in.city,
+        street_address=user_in.street_address,
+        zip=user_in.zip,
+        state_province=user_in.state_province,
+        country=user_in.country
     )
     
     fake_users_db[user_in.email] = {
-        "user": user_db,
+        "user": user_db.model_dump(),
         "hashed_password": get_password_hash(user_in.password)
     }
+    
+    save_users(fake_users_db)
 
     return user_db
 

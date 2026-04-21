@@ -25,4 +25,8 @@ async def get_current_user(token: str = Depends(oauth2_scheme)):
     user_record = fake_users_db.get(token_data.email)
     if user_record is None:
         raise credentials_exception
+    
+    # fake_users_db now stores the user as a dict because of JSON serialization
+    if isinstance(user_record["user"], dict):
+        return UserInDB(**user_record["user"])
     return user_record["user"]
