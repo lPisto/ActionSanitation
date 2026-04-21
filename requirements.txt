@@ -1,0 +1,10 @@
+fastapi
+uvicorn
+httpx
+stripe
+python-dotenv
+pydantic
+pydantic-settings
+bcrypt
+python-jose[cryptography]
+fastapi-mail
