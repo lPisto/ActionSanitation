@@ -62,23 +62,31 @@ async def process_csv():
             print(f"Procesando a {email}...")
 
             # 1. Crear el cliente en Spire ERP
-            generated_customer_no = f"W{uuid.uuid4().hex[:9]}"
+            generated_customer_no = f"W{uuid.uuid4().hex[:9]}".upper()
             spire_customer_data = {
                 "customerNo": truncate(generated_customer_no, 12),
                 "name": truncate(f"{first_name} {last_name}", 40),
                 "status": "A",
-                "contact": {
-                    "firstName": truncate(first_name, 20),
-                    "lastName": truncate(last_name, 30),
-                    "email": truncate(email, 50),
-                    "phone": truncate(phone, 20)
-                },
                 "address": {
+                    "name": truncate(f"{first_name} {last_name}", 40),
                     "city": truncate(city, 30),
                     "line1": truncate(street, 50),
-                    "postalZip": truncate(zip_code, 10),
+                    "postalCode": truncate(zip_code, 10),
                     "provState": truncate(state_prov, 20),
-                    "country": truncate(country, 3).upper() if country else ""
+                    "country": truncate(country, 3).upper() if country else "",
+                    "email": truncate(email, 50),
+                    "phone": {
+                        "number": truncate(phone, 20)
+                    },
+                    "contacts": [
+                        {
+                            "name": truncate(f"{first_name} {last_name}", 40),
+                            "email": truncate(email, 50),
+                            "phone": {
+                                "number": truncate(phone, 20)
+                            }
+                        }
+                    ]
                 }
             }
 
