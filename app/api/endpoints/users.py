@@ -2,7 +2,8 @@ from fastapi import APIRouter, Depends, HTTPException
 from app.models.user import UserInDB, UserUpdate
 from app.api.deps import get_current_user
 from app.services.spire_client import spire_client
-from app.api.endpoints.auth import fake_users_db, save_users, truncate
+from app.api.endpoints.auth import truncate
+from app.db.mongodb import get_database
 
 router = APIRouter()
 
@@ -42,7 +43,7 @@ async def update_user_me(user_update: UserUpdate, current_user: UserInDB = Depen
     if spire_update_data:
         await spire_client.update_customer(current_user.spire_customer_no, spire_update_data)
 
-    # 2. Update local DB
+    # 2. Update local DB (MongoDB)
     if user_update.first_name: current_user.first_name = user_update.first_name
     if user_update.last_name: current_user.last_name = user_update.last_name
     if user_update.company: current_user.company = user_update.company
@@ -53,8 +54,11 @@ async def update_user_me(user_update: UserUpdate, current_user: UserInDB = Depen
     if user_update.state_province: current_user.state_province = user_update.state_province
     if user_update.country: current_user.country = user_update.country
     
-    # Save back to fake DB
-    fake_users_db[current_user.email]["user"] = current_user.model_dump()
-    save_users(fake_users_db)
+    # Save back to MongoDB
+    db = get_database()
+    await db["users"].update_one(
+        {"email": current_user.email},
+        {"$set": {"user": current_user.model_dump()}}
+    )
     
     return current_user

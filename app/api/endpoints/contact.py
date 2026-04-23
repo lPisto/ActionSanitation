@@ -1,27 +1,10 @@
 from pydantic import BaseModel, EmailStr
 from fastapi import APIRouter, HTTPException
 from app.services.email_service import send_contact_email
-import json
-import os
 from datetime import datetime
+from app.db.mongodb import get_database
 
 router = APIRouter()
-
-CONTACTS_FILE = "contacts.json"
-
-def save_contact(data: dict):
-    contacts = []
-    if os.path.exists(CONTACTS_FILE):
-        try:
-            with open(CONTACTS_FILE, "r") as f:
-                contacts = json.load(f)
-        except json.JSONDecodeError:
-            contacts = []
-            
-    contacts.append(data)
-    
-    with open(CONTACTS_FILE, "w") as f:
-        json.dump(contacts, f, indent=4)
 
 class ContactForm(BaseModel):
     name: str
@@ -32,10 +15,12 @@ class ContactForm(BaseModel):
 @router.post("/")
 async def submit_contact_form(form: ContactForm):
     try:
-        # 1. Guardar en base de datos local (JSON)
+        # 1. Guardar en base de datos local (MongoDB)
         contact_data = form.model_dump()
         contact_data["timestamp"] = datetime.utcnow().isoformat()
-        save_contact(contact_data)
+        
+        db = get_database()
+        await db["contacts"].insert_one(contact_data)
 
         # 2. Enviar email al representante
         await send_contact_email(form.name, form.email, form.subject, form.message)

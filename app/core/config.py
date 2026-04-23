@@ -1,6 +1,9 @@
 from pydantic_settings import BaseSettings
 
 class Settings(BaseSettings):
+    MONGODB_URL: str
+    MONGODB_DB_NAME: str = "action_sanitation"
+    
     SPIRE_BASE_URL: str
     SPIRE_USERNAME: str
     SPIRE_PASSWORD: str

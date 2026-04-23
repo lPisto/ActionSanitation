@@ -1,6 +1,5 @@
 import asyncio
 import csv
-import json
 import uuid
 import sys
 import os
@@ -9,9 +8,12 @@ import os
 sys.path.append(os.path.dirname(os.path.abspath(__file__)))
 
 from app.services.spire_client import spire_client
-from app.api.endpoints.auth import load_users, save_users, truncate
+from app.db.mongodb import connect_to_mongo, close_mongo_connection, get_database
 
 CSV_FILE_PATH = "users.csv" # <-- CAMBIA ESTO por el nombre real de tu archivo
+
+def truncate(value: str, max_length: int):
+    return value[:max_length] if value else value
 
 async def process_csv():
     if not os.path.exists(CSV_FILE_PATH):
@@ -19,8 +21,8 @@ async def process_csv():
         print("Asegúrate de colocar tu export en esta carpeta y llamarlo 'users.csv'")
         return
 
-    # Cargamos nuestra base de datos local
-    local_db = load_users()
+    await connect_to_mongo()
+    db = get_database()
     
     with open(CSV_FILE_PATH, mode='r', encoding='utf-8-sig') as csvfile:
         reader = csv.DictReader(csvfile)
@@ -33,7 +35,8 @@ async def process_csv():
             if not email:
                 continue
 
-            if email in local_db:
+            existing_user = await db["users"].find_one({"email": email})
+            if existing_user:
                 print(f"Usuario {email} ya existe en BD local. Saltando...")
                 continue
             
@@ -88,10 +91,13 @@ async def process_csv():
                 print(f"  -> Error al crear {email} en Spire: {e}. Usando código autogenerado temporal.")
                 customer_no = generated_customer_no
 
-            # 2. Guardar en BD Local con el hash seguro aleatorio
-            local_db[email] = {
+            # 2. Guardar en BD Local (MongoDB)
+            user_count = await db["users"].count_documents({})
+            
+            user_doc = {
+                "email": email,
                 "user": {
-                    "id": str(len(local_db) + 1),
+                    "id": str(user_count + 1),
                     "spire_customer_no": customer_no,
                     "email": email,
                     "first_name": first_name,
@@ -101,9 +107,9 @@ async def process_csv():
                 "hashed_password": new_password_hash 
             }
             
-            # Guardamos progresivamente
-            save_users(local_db)
+            await db["users"].insert_one(user_doc)
 
+    await close_mongo_connection()
     print("Importación finalizada.")
 
 if __name__ == "__main__":

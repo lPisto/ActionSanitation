@@ -1,5 +1,4 @@
 import stripe
-import json
 import os
 from datetime import datetime
 from fastapi import APIRouter, Depends, HTTPException
@@ -9,23 +8,10 @@ from app.api.deps import get_current_user
 from app.models.user import UserInDB
 from app.models.order import OrderCreate, OrderResponse
 from app.core.config import settings
+from app.db.mongodb import get_database
 
 router = APIRouter()
 stripe.api_key = settings.STRIPE_API_KEY
-ORDERS_FILE = "orders.json"
-
-def save_local_order(order_data: dict):
-    orders = []
-    if os.path.exists(ORDERS_FILE):
-        try:
-            with open(ORDERS_FILE, "r") as f:
-                orders = json.load(f)
-        except json.JSONDecodeError:
-            orders = []
-            
-    orders.append(order_data)
-    with open(ORDERS_FILE, "w") as f:
-        json.dump(orders, f, indent=4)
 
 @router.post("/", response_model=OrderResponse)
 async def create_order(order: OrderCreate, current_user: UserInDB = Depends(get_current_user)):
@@ -74,7 +60,7 @@ async def create_order(order: OrderCreate, current_user: UserInDB = Depends(get_
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Unexpected error communicating with Spire: {str(e)}")
 
-    # 4. Save to local Database
+    # 4. Save to local Database (MongoDB)
     local_order = {
         "id": order.stripe_payment_intent_id,
         "spire_order_no": spire_order_no,
@@ -84,7 +70,8 @@ async def create_order(order: OrderCreate, current_user: UserInDB = Depends(get_
         "status": "Paid",
         "created_at": datetime.utcnow().isoformat()
     }
-    save_local_order(local_order)
+    db = get_database()
+    await db["orders"].insert_one(local_order)
 
     return {
         "order_id": spire_order_no,

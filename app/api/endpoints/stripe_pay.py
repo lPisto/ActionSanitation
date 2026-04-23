@@ -1,15 +1,13 @@
 import stripe
-import json
-import os
 from fastapi import APIRouter, HTTPException, Depends, Request, Header
 from pydantic import BaseModel
 from typing import Optional
 from app.core.config import settings
+from app.db.mongodb import get_database
 
 router = APIRouter()
 
 stripe.api_key = settings.STRIPE_API_KEY
-ORDERS_FILE = "orders.json"
 
 class PaymentIntentRequest(BaseModel):
     amount: int  # Amount in cents
@@ -17,24 +15,19 @@ class PaymentIntentRequest(BaseModel):
     order_id: Optional[str] = None
     customer_email: Optional[str] = None
 
-def update_local_order_status(intent_id: str, new_status: str, error_msg: str = None):
-    if not os.path.exists(ORDERS_FILE):
-        return
+async def update_local_order_status(intent_id: str, new_status: str, error_msg: str = None):
     try:
-        with open(ORDERS_FILE, "r") as f:
-            orders = json.load(f)
+        db = get_database()
+        update_data = {"status": new_status}
+        if error_msg:
+            update_data["error_message"] = error_msg
             
-        for order in orders:
-            if order.get("id") == intent_id:
-                order["status"] = new_status
-                if error_msg:
-                    order["error_message"] = error_msg
-                break
-                
-        with open(ORDERS_FILE, "w") as f:
-            json.dump(orders, f, indent=4)
+        await db["orders"].update_one(
+            {"id": intent_id},
+            {"$set": update_data}
+        )
     except Exception as e:
-        print(f"Error updating local order: {e}")
+        print(f"Error updating local order in MongoDB: {e}")
 
 @router.post("/create-payment-intent")
 async def create_payment_intent(request: PaymentIntentRequest):
@@ -94,7 +87,7 @@ async def stripe_webhook(request: Request, stripe_signature: str = Header(None))
         intent_id = payment_intent.get('id')
         
         # Sincronizamos la base de datos local (marcar como Pagada)
-        update_local_order_status(intent_id, "Paid")
+        await update_local_order_status(intent_id, "Paid")
         print(f"💰 ¡Webhook: Pago exitoso procesado para Intent ID: {intent_id}")
 
     elif event['type'] == 'payment_intent.payment_failed':
@@ -103,7 +96,7 @@ async def stripe_webhook(request: Request, stripe_signature: str = Header(None))
         intent_id = payment_intent.get('id')
         
         # Sincronizamos la base de datos local (marcar como Fallida y guardar el error)
-        update_local_order_status(intent_id, "Payment Failed", error_message)
+        await update_local_order_status(intent_id, "Payment Failed", error_message)
         print(f"❌ Webhook: Pago fallido para Intent ID: {intent_id}. Razón: {error_message}")
 
     return {"status": "success"}

@@ -8,3 +8,4 @@ pydantic-settings
 bcrypt
 python-jose[cryptography]
 fastapi-mail
+motor

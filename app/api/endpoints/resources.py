@@ -1,66 +1,60 @@
 import os
-import json
 import uuid
 import shutil
 from fastapi import APIRouter, File, UploadFile, Form, HTTPException
 from typing import List, Optional
+from app.db.mongodb import get_database
 
 router = APIRouter()
 
-RESOURCES_DB_FILE = "resources_db.json"
-
-# Initial structure if file does not exist
-INITIAL_DB = {
-    "catalogs": [],
-    "flyers": [],
-    "sds": [],
-    "gallery": [],
-    "training": []
-}
-
-def load_db():
-    if os.path.exists(RESOURCES_DB_FILE):
-        try:
-            with open(RESOURCES_DB_FILE, "r") as f:
-                return json.load(f)
-        except json.JSONDecodeError:
-            pass
-    return INITIAL_DB
-
-def save_db(db):
-    with open(RESOURCES_DB_FILE, "w") as f:
-        json.dump(db, f, indent=4)
+# Initial structure if file does not exist (not needed to initialize on disk anymore)
+CATEGORIES = ["catalogs", "flyers", "sds", "gallery", "training"]
 
 # Create static directories if they don't exist
-for category in INITIAL_DB.keys():
+for category in CATEGORIES:
     os.makedirs(f"static/{category}", exist_ok=True)
 
 # --- GET ENDPOINTS ---
 
 @router.get("/downloads/catalogs")
 async def get_catalogs():
-    db = load_db()
-    return db.get("catalogs", [])
+    db = get_database()
+    items = await db["resources"].find({"category": "catalogs"}).to_list(length=None)
+    for item in items:
+        item["_id"] = str(item["_id"])
+    return items
 
 @router.get("/downloads/flyers")
 async def get_flyers():
-    db = load_db()
-    return db.get("flyers", [])
+    db = get_database()
+    items = await db["resources"].find({"category": "flyers"}).to_list(length=None)
+    for item in items:
+        item["_id"] = str(item["_id"])
+    return items
 
 @router.get("/downloads/sds")
 async def get_sds():
-    db = load_db()
-    return db.get("sds", [])
+    db = get_database()
+    items = await db["resources"].find({"category": "sds"}).to_list(length=None)
+    for item in items:
+        item["_id"] = str(item["_id"])
+    return items
 
 @router.get("/gallery")
 async def get_gallery():
-    db = load_db()
-    return db.get("gallery", [])
+    db = get_database()
+    items = await db["resources"].find({"category": "gallery"}).to_list(length=None)
+    for item in items:
+        item["_id"] = str(item["_id"])
+    return items
 
 @router.get("/training")
 async def get_training_materials():
-    db = load_db()
-    return db.get("training", [])
+    db = get_database()
+    items = await db["resources"].find({"category": "training"}).to_list(length=None)
+    for item in items:
+        item["_id"] = str(item["_id"])
+    return items
 
 # --- UPLOAD (POST) ENDPOINTS ---
 
@@ -70,7 +64,7 @@ async def upload_resource(
     file: UploadFile = File(...),
     title: Optional[str] = Form(None)
 ):
-    if category not in INITIAL_DB.keys():
+    if category not in CATEGORIES:
         raise HTTPException(status_code=400, detail="Invalid category. Must be: catalogs, flyers, sds, gallery, training")
 
     # Ensure secure filename and generate unique ID
@@ -93,9 +87,10 @@ async def upload_resource(
     display_name = title if title else os.path.splitext(file.filename)[0]
 
     # Build DB entry
-    db = load_db()
+    db = get_database()
     entry = {
         "id": unique_id,
+        "category": category,
         "name": display_name,
     }
     
@@ -112,21 +107,19 @@ async def upload_resource(
         del entry["name"]
 
     # Save to database
-    db[category].append(entry)
-    save_db(db)
+    await db["resources"].insert_one(entry.copy())
 
     return {"message": f"Successfully uploaded to {category}", "data": entry}
 
 @router.delete("/{category}/{item_id}")
 async def delete_resource(category: str, item_id: str):
-    if category not in INITIAL_DB.keys():
+    if category not in CATEGORIES:
         raise HTTPException(status_code=400, detail="Invalid category.")
 
-    db = load_db()
-    items = db.get(category, [])
+    db = get_database()
     
     # Find item
-    item_to_delete = next((item for item in items if item["id"] == item_id), None)
+    item_to_delete = await db["resources"].find_one({"category": category, "id": item_id})
     
     if not item_to_delete:
         raise HTTPException(status_code=404, detail="Item not found")
@@ -141,7 +134,6 @@ async def delete_resource(category: str, item_id: str):
             os.remove(file_path)
 
     # Remove from DB
-    db[category] = [item for item in items if item["id"] != item_id]
-    save_db(db)
+    await db["resources"].delete_one({"category": category, "id": item_id})
 
     return {"message": "Resource deleted successfully"}

@@ -4,41 +4,25 @@ import time
 from app.models.user import UserCreate, Token, UserInDB
 from app.core.security import verify_password, get_password_hash, create_access_token
 from app.services.spire_client import spire_client
+from app.db.mongodb import get_database
 import uuid
-
-import json
-import os
 
 router = APIRouter()
 
 oauth2_scheme = OAuth2PasswordBearer(tokenUrl="/api/auth/login")
-
-USERS_FILE = "users.json"
-
-def load_users():
-    if os.path.exists(USERS_FILE):
-        with open(USERS_FILE, "r") as f:
-            try:
-                return json.load(f)
-            except json.JSONDecodeError:
-                return {}
-    return {}
-
-def save_users(db):
-    with open(USERS_FILE, "w") as f:
-        json.dump(db, f, indent=4)
-
-fake_users_db = load_users()
 
 def truncate(value: str, max_length: int):
     return value[:max_length] if value else value
 
 @router.post("/register", response_model=UserInDB)
 async def register(user_in: UserCreate):
+    db = get_database()
+    
     if user_in.password != user_in.confirm_password:
         raise HTTPException(status_code=400, detail="Passwords do not match")
     
-    if user_in.email in fake_users_db:
+    existing_user = await db["users"].find_one({"email": user_in.email})
+    if existing_user:
         raise HTTPException(status_code=400, detail="Email already registered")
 
     # Generate a unique customer number for Spire
@@ -70,9 +54,10 @@ async def register(user_in: UserCreate):
     # Assuming Spire returns the generated customer number (e.g. 'customerNo')
     spire_customer_no = spire_response.get("customerNo", generated_customer_no)
 
-    # 3. Save to local DB
+    # 3. Save to local DB (MongoDB)
+    user_count = await db["users"].count_documents({})
     user_db = UserInDB(
-        id=str(len(fake_users_db) + 1),
+        id=str(user_count + 1),
         spire_customer_no=spire_customer_no,
         email=user_in.email,
         first_name=user_in.first_name,
@@ -86,18 +71,21 @@ async def register(user_in: UserCreate):
         country=user_in.country
     )
     
-    fake_users_db[user_in.email] = {
+    user_doc = {
+        "email": user_in.email,
         "user": user_db.model_dump(),
         "hashed_password": get_password_hash(user_in.password)
     }
     
-    save_users(fake_users_db)
+    await db["users"].insert_one(user_doc)
 
     return user_db
 
 @router.post("/login", response_model=Token)
 async def login(form_data: OAuth2PasswordRequestForm = Depends()):
-    user_record = fake_users_db.get(form_data.username)
+    db = get_database()
+    user_record = await db["users"].find_one({"email": form_data.username})
+    
     if not user_record:
         raise HTTPException(status_code=400, detail="Incorrect email or password")
     
