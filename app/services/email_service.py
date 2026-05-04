@@ -20,7 +20,7 @@ async def send_contact_email(name: str, email: str, subject: str, message: str):
         return
         
     html = f"""
-    <p>New contact form submission from: {name} ({email})</p>
+    <b> New contact form submission from: </b><p> {name} ({email})</p>
     <p><strong>Subject:</strong> {subject}</p>
     <p><strong>Message:</strong></p>
     <p>{message}</p>
