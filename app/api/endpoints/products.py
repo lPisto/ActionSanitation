@@ -21,6 +21,8 @@ async def get_products(
     
     if on_sale:
         deals = await spire_client.get_deals()
+        # Filter out deals with '*' in the description
+        deals = [d for d in deals if "*" not in d.get("inventory", {}).get("description", "")]
         # Pagination for deals
         return {
             "records": deals[actual_start : actual_start + limit],
@@ -90,6 +92,9 @@ async def get_products(
 
     # Normalize response to match detail endpoint structure expected by the frontend
     if "records" in res:
+        # Filter out records with '*' in the description
+        res["records"] = [r for r in res["records"] if "*" not in r.get("description", "")]
+        
         for record in res["records"]:
             # Normalize salesDept
             if "salesDepartment" in record and isinstance(record["salesDepartment"], dict):
@@ -138,4 +143,5 @@ async def get_special_pricing(product_id: str, current_user: UserInDB = Depends(
 async def get_deals():
     # Obtiene todas las ofertas activas desde Spire
     deals = await spire_client.get_deals()
+    deals = [d for d in deals if "*" not in d.get("inventory", {}).get("description", "")]
     return deals
