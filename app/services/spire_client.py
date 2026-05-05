@@ -33,8 +33,11 @@ class SpireClient:
             except httpx.RequestError as e:
                 raise HTTPException(status_code=500, detail=f"Failed to connect to Spire API: {str(e)}")
 
-    async def get_products(self, limit: int = 100, start: int = 0, group_no: str = None, department_code: str = None):
+    async def get_products(self, limit: int = 100, start: int = 0, group_no: str = None, department_code: str = None, q: str = None):
         params = {"limit": limit, "start": start}
+        if q:
+            params["q"] = q
+            
         filters = {}
         if group_no:
             filters["groupNo"] = group_no
