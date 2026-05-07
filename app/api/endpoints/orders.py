@@ -124,7 +124,7 @@ async def get_order_history(current_user: UserInDB = Depends(get_current_user)):
         spire_status = status_map.get(rec.get("status", "O"), rec.get("status", "O"))
         
         # Combinamos ambos estados para mayor claridad al cliente
-        rec_copy["status"] = f"{payment_status} & {spire_status}"
+        rec_copy["status"] = f"{payment_status}"
         
         # Extraemos el total real cobrado en Stripe desde la BD local. Si no existe, usamos el de Spire.
         local_total = local_info.get("total_amount")
@@ -133,6 +133,9 @@ async def get_order_history(current_user: UserInDB = Depends(get_current_user)):
             rec_copy["total_amount"] = float(raw_total)
         except (ValueError, TypeError):
             rec_copy["total_amount"] = 0.0
+            
+        # Aseguramos que los items se incluyan en el JSON para poder verlos en el historial del frontend
+        rec_copy["items"] = local_info.get("items") or rec.get("items") or []
             
         formatted_orders.append(rec_copy)
         
@@ -159,11 +162,25 @@ async def repeat_purchase(order_id: str, current_user: UserInDB = Depends(get_cu
             # Buscamos el partNo en la raíz (o dentro de inventory por seguridad)
             part_no = item.get("partNo") or item.get("inventory", {}).get("partNo")
             if part_no:
+                name = item.get("description") or part_no
+                image = None
+                
+                # Intentamos recuperar el producto desde el inventario para obtener la imagen y nombre real
+                try:
+                    product = await spire_client.get_product(part_no)
+                    name = product.get("description") or name
+                    images = product.get("images", [])
+                    if isinstance(images, list) and len(images) > 0:
+                        image = images[0].get("url")
+                except Exception:
+                    pass
+
                 items_to_cart.append({
                     "product_id": part_no,
-                    "name": item.get("description", part_no),  # React espera la propiedad 'name'
+                    "name": name,  # React espera la propiedad 'name'
                     "quantity": item.get("orderQty", 1),
-                    "price": float(item.get("unitPrice", 0))   # Aseguramos que el precio sea número
+                    "price": float(item.get("unitPrice", 0)),   # Aseguramos que el precio sea número
+                    "image": image
                 })
 
         return {
