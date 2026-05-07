@@ -89,7 +89,14 @@ class SpireClient:
         valid_deals = []
         for record in res.get("records", []):
             end_date = record.get("endDate")
-            # Si no tiene fecha de fin, o la fecha de fin es igual o posterior a hoy, es una oferta válida
+            # Si no tiene fecha de fin, o la fecha de fin es igual o posterior a hoy o tiene precio $0, es una oferta válida
+            try:
+                price = float(record.get("price", 0))
+                if price <= 0:
+                    continue
+            except (ValueError, TypeError):
+                continue
+                
             if not end_date or end_date >= current_date:
                 valid_deals.append(record)
                 

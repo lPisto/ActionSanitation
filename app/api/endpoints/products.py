@@ -6,6 +6,49 @@ from typing import Optional
 
 router = APIRouter()
 
+def is_product_active(product_data: dict) -> bool:
+    # For deals (price_matrix), description is often nested
+    description = product_data.get("inventory", {}).get("description", "")
+    # For direct products (inventory/items), or as a fallback, check root
+    if not description:
+        description = product_data.get("description", "")
+    
+    if "*" in description or "discontinued" in description.lower():
+        return False
+        
+    # Extraer el precio dependiendo de si es una oferta o un producto regular de inventario
+    price = product_data.get("price")
+    if price is None:
+        sell_prices = product_data.get("pricing", {}).get("sellPrice")
+        
+    try:
+        numeric_price = float(price) if price is not None else 0.0
+    except (ValueError, TypeError):
+        numeric_price = 0.0
+        
+    # Si no tiene precio explícito o es 0, buscamos el precio base del catálogo
+    if numeric_price <= 0:
+        # En las ofertas (deals), el precio base está anidado en 'inventory'
+        sell_prices = product_data.get("inventory", {}).get("pricing", {}).get("sellPrice")
+        
+        # En los productos normales, está directamente en la raíz
+        if not sell_prices:
+            sell_prices = product_data.get("pricing", {}).get("sellPrice")
+            
+        if isinstance(sell_prices, list) and len(sell_prices) > 0:
+            price = sell_prices[0]
+        else:
+            price = sell_prices
+        
+            
+    try:
+        if price is not None and float(price) <= 0:
+            return False
+    except (ValueError, TypeError):
+        pass
+        
+    return True
+
 @router.get("")
 @router.get("/")
 async def get_products(
@@ -21,8 +64,8 @@ async def get_products(
     
     if on_sale:
         deals = await spire_client.get_deals()
-        # Filter out deals with '*' in the description
-        deals = [d for d in deals if "*" not in d.get("inventory", {}).get("description", "")]
+        # Filter out deals with '*' or 'discontinued' in the description
+        deals = [d for d in deals if is_product_active(d)]
         # Pagination for deals
         return {
             "records": deals[actual_start : actual_start + limit],
@@ -92,8 +135,8 @@ async def get_products(
 
     # Normalize response to match detail endpoint structure expected by the frontend
     if "records" in res:
-        # Filter out records with '*' in the description
-        res["records"] = [r for r in res["records"] if "*" not in r.get("description", "")]
+        # Filter out records with '*' or 'discontinued' in the description
+        res["records"] = [r for r in res["records"] if is_product_active(r)]
         
         for record in res["records"]:
             # Normalize salesDept
@@ -143,5 +186,5 @@ async def get_special_pricing(product_id: str, current_user: UserInDB = Depends(
 async def get_deals():
     # Obtiene todas las ofertas activas desde Spire
     deals = await spire_client.get_deals()
-    deals = [d for d in deals if "*" not in d.get("inventory", {}).get("description", "")]
+    deals = [d for d in deals if is_product_active(d)]
     return deals
