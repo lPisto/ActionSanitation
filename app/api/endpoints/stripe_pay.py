@@ -1,7 +1,8 @@
 import stripe
 from fastapi import APIRouter, HTTPException, Depends, Request, Header
 from pydantic import BaseModel
-from typing import Optional
+from typing import Optional, List
+from datetime import datetime
 from app.core.config import settings
 from app.db.mongodb import get_database
 
@@ -14,6 +15,7 @@ class PaymentIntentRequest(BaseModel):
     currency: str = "usd"
     order_id: Optional[str] = None
     customer_email: Optional[str] = None
+    items: Optional[List[dict]] = []
 
 async def update_local_order_status(intent_id: str, new_status: str, error_msg: str = None):
     try:
@@ -46,6 +48,22 @@ async def create_payment_intent(request: PaymentIntentRequest):
 
         intent = stripe.PaymentIntent.create(**intent_params)
         
+        # Guardamos la orden como "Pending" para registrar intentos abandonados o cancelados
+        try:
+            db = get_database()
+            local_order = {
+                "id": intent.id,
+                "spire_order_no": "Pending",
+                "customer_email": request.customer_email,
+                "total_amount": request.amount / 100.0,
+                "items": request.items,
+                "status": "Pending",
+                "created_at": datetime.utcnow().isoformat()
+            }
+            await db["orders"].insert_one(local_order)
+        except Exception as e:
+            print(f"Error saving pending order to MongoDB: {e}")
+
         return {
             "clientSecret": intent.client_secret,
             "paymentIntentId": intent.id
@@ -98,5 +116,11 @@ async def stripe_webhook(request: Request, stripe_signature: str = Header(None))
         # Sincronizamos la base de datos local (marcar como Fallida y guardar el error)
         await update_local_order_status(intent_id, "Payment Failed", error_message)
         print(f"❌ Webhook: Pago fallido para Intent ID: {intent_id}. Razón: {error_message}")
+        
+    elif event['type'] == 'payment_intent.canceled':
+        payment_intent = event['data']['object']
+        intent_id = payment_intent.get('id')
+        await update_local_order_status(intent_id, "Canceled")
+        print(f"⚠️ Webhook: Pago cancelado para Intent ID: {intent_id}")
 
     return {"status": "success"}

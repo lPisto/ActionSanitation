@@ -34,7 +34,7 @@ class SpireClient:
                 raise HTTPException(status_code=500, detail=f"Failed to connect to Spire API: {str(e)}")
 
     async def get_products(self, limit: int = 100, start: int = 0, group_no: str = None, department_code: str = None, q: str = None):
-        params = {"limit": limit, "start": start}
+        params = {"limit": limit, "start": start, "embed": "images"}
         if q:
             params["q"] = q
             
@@ -58,7 +58,7 @@ class SpireClient:
         return await self._request("GET", "inventory/sales_departments/", params={"limit": 0})
 
     async def get_product(self, product_id: str):
-        return await self._request("GET", f"inventory/items/{product_id}")
+        return await self._request("GET", f"inventory/items/{product_id}", params={"embed": "images"})
 
     async def get_customer(self, customer_no: str):
         return await self._request("GET", f"customers/{customer_no}")
@@ -99,8 +99,16 @@ class SpireClient:
         return await self._request("POST", "sales/orders/", json=order_data)
         
     async def get_customer_orders(self, customer_no: str):
-        filter_query = json.dumps({"customer.customerNo": customer_no})
-        return await self._request("GET", "sales/orders/", params={"filter": filter_query})
+        # Alternativa: Usamos el buscador global "q" para evitar los errores 500 del parámetro "filter"
+        res = await self._request("GET", "sales/orders/", params={"q": customer_no, "limit": 100})
+        
+        # Filtramos internamente con Python para garantizar que coincida el código de cliente exacto
+        filtered_records = [
+            order for order in res.get("records", [])
+            if order.get("customer", {}).get("customerNo") == customer_no
+        ]
+        res["records"] = filtered_records
+        return res
 
     async def get_sales_order(self, order_id: str):
         return await self._request("GET", f"sales/orders/{order_id}")
