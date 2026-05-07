@@ -9,6 +9,7 @@ from app.models.user import UserInDB
 from app.models.order import OrderCreate, OrderResponse
 from app.core.config import settings
 from app.db.mongodb import get_database
+from app.services.email_service import send_order_confirmation_email
 
 router = APIRouter()
 stripe.api_key = settings.STRIPE_API_KEY
@@ -104,6 +105,19 @@ async def create_order(order: OrderCreate, current_user: UserInDB = Depends(get_
         }},
         upsert=True
     )
+
+    # 5. Enviar email de confirmación
+    try:
+        await send_order_confirmation_email(
+            to_email=current_user.email,
+            name=f"{current_user.first_name} {current_user.last_name}".strip(),
+            order_id=spire_order_no,
+            items=saved_items,
+            total_amount=total_amount,
+            shipping_address=order.shipping_address or "N/A"
+        )
+    except Exception as e:
+        print(f"Error sending order confirmation email: {e}")
 
     return {
         "order_id": spire_order_no,

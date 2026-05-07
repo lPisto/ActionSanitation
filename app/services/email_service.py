@@ -35,3 +35,42 @@ async def send_contact_email(name: str, email: str, subject: str, message: str):
 
     fm = FastMail(conf)
     await fm.send_message(message_schema)
+
+async def send_order_confirmation_email(to_email: str, name: str, order_id: str, items: list, total_amount: float, shipping_address: str):
+    if not settings.MAIL_USERNAME:
+        print("Email not configured, skipping order confirmation send.")
+        return
+        
+    items_html = "".join([
+        f"<li><strong>{item.get('name', 'Item')}</strong> (SKU: {item.get('sku', '')})<br>"
+        f"Qty: {item.get('quantity', 1)} | Price: ${float(item.get('price', 0)):.2f}</li>"
+        for item in items
+    ])
+
+    html = f"""
+    <div style="font-family: Arial, sans-serif; max-width: 600px; margin: auto; color: #333;">
+        <h2 style="color: #2563eb;">Thank you for your order, {name}!</h2>
+        <p>Your order <strong>#{order_id}</strong> has been successfully confirmed and is now being processed.</p>
+        
+        <h3 style="border-bottom: 1px solid #ccc; padding-bottom: 5px;">Order Details</h3>
+        <ul>
+            {items_html}
+        </ul>
+        <p><strong>Total Amount (incl. shipping & taxes):</strong> ${total_amount:.2f}</p>
+        <p><strong>Shipping Address:</strong> {shipping_address}</p>
+        
+        <br>
+        <p>We will notify you once your order ships. If you have any questions, feel free to reply to this email.</p>
+        <p>Best regards,<br><strong>Action Sanitation</strong></p>
+    </div>
+    """
+
+    message_schema = MessageSchema(
+        subject=f"Order Confirmation #{order_id} - Action Sanitation",
+        recipients=[to_email],
+        body=html,
+        subtype="html"
+    )
+
+    fm = FastMail(conf)
+    await fm.send_message(message_schema)
