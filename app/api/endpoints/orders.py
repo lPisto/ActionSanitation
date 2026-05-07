@@ -81,13 +81,24 @@ async def create_order(order: OrderCreate, current_user: UserInDB = Depends(get_
 
     # 4. Actualizar la orden local en la base de datos de "Pending" a "Paid"
     db = get_database()
+    existing_order = await db["orders"].find_one({"id": order.stripe_payment_intent_id})
+    
+    if existing_order and existing_order.get("items"):
+        saved_items = existing_order.get("items")
+    else:
+        # Intentamos rescatar los campos extra si el modelo lo permite, sino usamos valores por defecto
+        saved_items = []
+        for i in order.items:
+            saved_items.append({"product_id": i.product_id, "quantity": i.quantity, "price": i.price, "name": getattr(i, "name", ""), "sku": getattr(i, "sku", i.product_id), "image": getattr(i, "image", None)})
+
     await db["orders"].update_one(
         {"id": order.stripe_payment_intent_id},
         {"$set": {
             "spire_order_no": spire_order_no,
             "customer_email": current_user.email,
             "total_amount": total_amount,
-            "items": [{"product_id": i.product_id, "quantity": i.quantity, "price": i.price} for i in order.items],
+            "shipping_address": order.shipping_address,
+            "items": saved_items,
             "status": "Paid",
             "updated_at": datetime.utcnow().isoformat()
         }},
@@ -134,9 +145,55 @@ async def get_order_history(current_user: UserInDB = Depends(get_current_user)):
         except (ValueError, TypeError):
             rec_copy["total_amount"] = 0.0
             
-        # Aseguramos que los items se incluyan en el JSON para poder verlos en el historial del frontend
-        rec_copy["items"] = local_info.get("items") or rec.get("items") or []
+        # Extraemos la dirección de envío y la fecha
+        shipping_addr = rec.get("shippingAddress", {})
+        rec_copy["ship_to"] = shipping_addr.get("line1") or local_info.get("shipping_address") or ""
+        rec_copy["shipping_city"] = shipping_addr.get("city") or ""
+        rec_copy["created_at"] = local_info.get("created_at") or rec.get("orderDate") or ""
             
+        # Extraemos los items combinando Spire (cantidades reales) y local (nombres que Spire no devuelve)
+        spire_items = rec.get("items") or []
+        local_items = local_info.get("items") or []
+        
+        mapped_items = []
+        if spire_items:
+            for it in spire_items:
+                part_no = it.get("partNo") or it.get("inventory", {}).get("partNo")
+                
+                # Buscamos si tenemos guardado el nombre original en nuestra BD local
+                local_match = next((li for li in local_items if li.get("product_id") == part_no), {})
+                
+                name = it.get("description")
+                image = local_match.get("image")
+                
+                if not name or str(name).strip() == "":
+                    name = local_match.get("name")
+                    
+                    # Si es una orden antigua y la BD local no tiene el nombre, consultamos al inventario de Spire
+                    if not name:
+                        try:
+                            product = await spire_client.get_product(part_no)
+                            name = product.get("description") or part_no
+                            
+                            images = product.get("images", [])
+                            if isinstance(images, list) and len(images) > 0:
+                                image = images[0].get("url")
+                        except Exception:
+                            name = part_no
+
+                mapped_items.append({
+                    "product_id": part_no,
+                    "name": name,
+                    "sku": local_match.get("sku") or part_no,
+                    "quantity": it.get("orderQty", 1),
+                    "price": float(it.get("unitPrice", 0)) if it.get("unitPrice") is not None else 0.0,
+                    "image": image
+                })
+        else:
+            mapped_items = local_items
+            
+        rec_copy["items"] = mapped_items
+
         formatted_orders.append(rec_copy)
         
     return formatted_orders
