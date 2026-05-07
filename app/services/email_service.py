@@ -74,3 +74,26 @@ async def send_order_confirmation_email(to_email: str, name: str, order_id: str,
 
     fm = FastMail(conf)
     await fm.send_message(message_schema)
+
+async def send_newsletter_notification_email(subscriber_email: str):
+    if not settings.MAIL_USERNAME:
+        print("Email not configured, skipping newsletter notification send.")
+        return
+        
+    html = f"""
+    <div style="font-family: Arial, sans-serif; color: #333;">
+        <h2 style="color: #2563eb;">New Newsletter Subscriber!</h2>
+        <p>A new user has just signed up for the newsletter on the website.</p>
+        <p><strong>Email address:</strong> <a href="mailto:{subscriber_email}">{subscriber_email}</a></p>
+    </div>
+    """
+
+    message_schema = MessageSchema(
+        subject="New Newsletter Subscription",
+        recipients=[settings.SALES_EMAIL],
+        body=html,
+        subtype="html"
+    )
+    
+    fm = FastMail(conf)
+    await fm.send_message(message_schema)

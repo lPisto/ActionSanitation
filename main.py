@@ -4,7 +4,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
 from contextlib import asynccontextmanager
 import os
-from app.api.endpoints import auth, products, users, orders, resources, contact, stripe_pay
+from app.api.endpoints import auth, products, users, orders, resources, contact, stripe_pay, newsletter
 from app.core.config import settings
 from app.db.mongodb import connect_to_mongo, close_mongo_connection
 
@@ -37,6 +37,7 @@ app.include_router(orders.router, prefix="/api/orders", tags=["Orders"])
 app.include_router(resources.router, prefix="/api/resources", tags=["Resources"])
 app.include_router(contact.router, prefix="/api/contact", tags=["Contact"])
 app.include_router(stripe_pay.router, prefix="/api/stripe", tags=["Stripe"])
+app.include_router(newsletter.router, prefix="/api/newsletter", tags=["newsletter"])
 
 @app.get("/api/health")
 def health_check():
