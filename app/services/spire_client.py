@@ -59,6 +59,22 @@ class SpireClient:
 
     async def get_product(self, product_id: str):
         return await self._request("GET", f"inventory/items/{product_id}", params={"embed": "images"})
+        
+    async def get_product_images(self, product_id: str):
+        return await self._request("GET", f"inventory/items/{product_id}/images")
+
+    async def get_product_image_data(self, product_id: str, image_id: str):
+        url = f"{self.base_url}inventory/items/{product_id}/images/{image_id}/data"
+        headers = self.auth_header.copy()
+        async with httpx.AsyncClient(follow_redirects=True) as client:
+            try:
+                response = await client.get(url, headers=headers)
+                response.raise_for_status()
+                return response.content, response.headers.get("Content-Type", "image/jpeg")
+            except httpx.HTTPStatusError as e:
+                raise HTTPException(status_code=e.response.status_code, detail="Spire API error fetching image")
+            except httpx.RequestError as e:
+                raise HTTPException(status_code=500, detail="Failed to connect to Spire API for image")
 
     async def get_customer(self, customer_no: str):
         return await self._request("GET", f"customers/{customer_no}")
@@ -84,7 +100,7 @@ class SpireClient:
         # Spire API no soporta facilmente filtros OR de fecha nula o mayor en la URL, 
         # así que traemos las globales y filtramos en Python por simplicidad o usamos un filtro básico.
         filter_query = json.dumps({"customerNo": None})
-        res = await self._request("GET", "inventory/price_matrix/", params={"filter": filter_query, "limit": 100})
+        res = await self._request("GET", "inventory/price_matrix/", params={"filter": filter_query, "limit": 100, "embed": "inventory.images"})
         
         valid_deals = []
         for record in res.get("records", []):

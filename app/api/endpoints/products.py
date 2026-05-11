@@ -1,4 +1,5 @@
-from fastapi import APIRouter, Depends, Query
+from fastapi import APIRouter, Depends, Query, Response, HTTPException, Request
+import base64
 from app.services.spire_client import spire_client
 from app.api.deps import get_current_user
 from app.models.user import UserInDB
@@ -49,9 +50,70 @@ def is_product_active(product_data: dict) -> bool:
         
     return True
 
+def normalize_product_data(record: dict, request: Request = None) -> dict:
+    inv = record.get("inventory", {})
+    images_obj = record.get("images") or inv.get("images")
+    
+    # Extraer el array real de imágenes, ya sea que venga como una lista plana o como un objeto de colección Spire {"records": [...]}
+    images_list = images_obj.get("records", []) if isinstance(images_obj, dict) else (images_obj if isinstance(images_obj, list) else [])
+        
+    part_no = record.get("id", record.get("partNo"))
+    if not part_no and inv:
+        part_no = inv.get("id", inv.get("partNo"))
+        
+    record["image"] = None
+    normalized_images = []
+    
+    base_url = str(request.base_url).rstrip('/') if request else "http://localhost:8000"
+    
+    for img_data in images_list:
+        img_url = None
+        img_id = img_data.get("id")
+        if img_id and part_no:
+            img_url = f"{base_url}/api/products/{part_no}/image/{img_id}"
+        elif img_data.get("url"):
+            img_url = img_data.get("url")
+            
+        if img_url:
+            normalized_images.append(img_url)
+
+    if normalized_images:
+        record["image"] = normalized_images[0]
+    elif part_no:
+        # Fallback a la ruta genérica de imagen por si Spire omitió el embed en la lista
+        record["image"] = f"{base_url}/api/products/{part_no}/image"
+        # También lo agregamos a la lista por si el frontend usa 'images[0]' para mostrar la foto principal
+        normalized_images.append(record["image"])
+        
+    # Sobrescribir "images" con la lista plana de URLs para el frontend
+    record["images"] = normalized_images
+
+    # Normalizar departamento
+    sales_dept = record.get("salesDepartment") or inv.get("salesDepartment")
+    if isinstance(sales_dept, dict):
+        code = sales_dept.get("code")
+        record["salesDept"] = int(code) if code and code.isdigit() else sales_dept.get("id", 0)
+    
+    # Normalizar UoM
+    measure_code = record.get("sellMeasureCode") or inv.get("sellMeasureCode") or "EACH"
+    uom = record.get("uom") or inv.get("uom")
+    if uom:
+        record["unitOfMeasures"] = {measure_code: uom}
+    elif "unitOfMeasures" not in record:
+        record["unitOfMeasures"] = {measure_code: {"description": measure_code}}
+        
+    # Normalizar Precios
+    pricing = record.get("pricing") or inv.get("pricing")
+    if pricing and "sellPrice" in pricing:
+        sell_prices = pricing["sellPrice"]
+        record["pricing"] = {measure_code: {"sellPrices": sell_prices}}
+
+    return record
+
 @router.get("")
 @router.get("/")
 async def get_products(
+    request: Request,
     limit: int = 100, 
     start: int = 0, 
     skip: Optional[int] = None, 
@@ -66,6 +128,10 @@ async def get_products(
         deals = await spire_client.get_deals()
         # Filter out deals with '*' or 'discontinued' in the description
         deals = [d for d in deals if is_product_active(d)]
+        
+        for d in deals:
+            normalize_product_data(d, request)
+            
         # Pagination for deals
         return {
             "records": deals[actual_start : actual_start + limit],
@@ -139,22 +205,7 @@ async def get_products(
         res["records"] = [r for r in res["records"] if is_product_active(r)]
         
         for record in res["records"]:
-            # Normalize salesDept
-            if "salesDepartment" in record and isinstance(record["salesDepartment"], dict):
-                code = record["salesDepartment"].get("code")
-                record["salesDept"] = int(code) if code and code.isdigit() else record["salesDepartment"].get("id", 0)
-            
-            # Normalize unitOfMeasures
-            measure_code = record.get("sellMeasureCode", "EACH")
-            if "uom" in record and record["uom"]:
-                record["unitOfMeasures"] = {measure_code: record["uom"]}
-            elif "unitOfMeasures" not in record:
-                record["unitOfMeasures"] = {measure_code: {"description": measure_code}}
-                
-            # Normalize pricing
-            if "pricing" in record and "sellPrice" in record["pricing"]:
-                sell_prices = record["pricing"]["sellPrice"]
-                record["pricing"] = {measure_code: {"sellPrices": sell_prices}}
+            normalize_product_data(record, request)
 
     return res
 
@@ -169,8 +220,34 @@ async def get_departments():
     return await spire_client.get_sales_departments()
 
 @router.get("/{product_id}")
-async def get_product(product_id: str):
-    return await spire_client.get_product(product_id)
+async def get_product(product_id: str, request: Request):
+    product = await spire_client.get_product(product_id)
+    return normalize_product_data(product, request)
+
+@router.get("/{product_id}/image")
+@router.get("/{product_id}/image/{image_id}")
+async def get_product_image(product_id: str, image_id: Optional[str] = None):
+    if not image_id:
+        try:
+            images_res = await spire_client.get_product_images(product_id)
+            records = images_res.get("records", [])
+            if not records:
+                raise HTTPException(status_code=404, detail="No image found for this product")
+            image_id = str(records[0]["id"])
+        except HTTPException:
+            raise
+        except Exception as e:
+            raise HTTPException(status_code=500, detail=str(e))
+            
+    content, content_type = await spire_client.get_product_image_data(product_id, image_id)
+    
+    # --- Log de la imagen en base64 en la terminal ---
+    # b64_image = base64.b64encode(content).decode('utf-8')
+    # print(f"\n--- INICIO BASE64 IMAGEN (Producto: {product_id}, Imagen: {image_id}) ---")
+    # print(f"data:{content_type};base64,{b64_image}")
+    # print("--- FIN BASE64 IMAGEN ---\n")
+
+    return Response(content=content, media_type=content_type)
 
 @router.get("/{product_id}/pricing")
 async def get_special_pricing(product_id: str, current_user: UserInDB = Depends(get_current_user)):
@@ -183,8 +260,10 @@ async def get_special_pricing(product_id: str, current_user: UserInDB = Depends(
         return {"product_id": product_id, "special_price": None, "message": "No special pricing found"}
 
 @router.get("/deals/all")
-async def get_deals():
+async def get_deals(request: Request):
     # Obtiene todas las ofertas activas desde Spire
     deals = await spire_client.get_deals()
     deals = [d for d in deals if is_product_active(d)]
+    for d in deals:
+        normalize_product_data(d, request)
     return deals

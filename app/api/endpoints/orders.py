@@ -1,7 +1,7 @@
 import stripe
 import os
 from datetime import datetime
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends, HTTPException, Request
 from typing import List
 from app.services.spire_client import spire_client
 from app.api.deps import get_current_user
@@ -127,7 +127,7 @@ async def create_order(order: OrderCreate, current_user: UserInDB = Depends(get_
 
 @router.get("/me")
 @router.get("/history")
-async def get_order_history(current_user: UserInDB = Depends(get_current_user)):
+async def get_order_history(request: Request, current_user: UserInDB = Depends(get_current_user)):
     # Fetch orders from Spire for this customer
     response = await spire_client.get_customer_orders(current_user.spire_customer_no)
     records = response.get("records", [])
@@ -189,9 +189,15 @@ async def get_order_history(current_user: UserInDB = Depends(get_current_user)):
                             product = await spire_client.get_product(part_no)
                             name = product.get("description") or part_no
                             
-                            images = product.get("images", [])
-                            if isinstance(images, list) and len(images) > 0:
-                                image = images[0].get("url")
+                            images_obj = product.get("images")
+                            images_list = images_obj.get("records", []) if isinstance(images_obj, dict) else (images_obj if isinstance(images_obj, list) else [])
+                            if len(images_list) > 0:
+                                img_id = images_list[0].get("id")
+                                if img_id:
+                                    base_url = str(request.base_url).rstrip('/')
+                                    image = f"{base_url}/api/products/{product.get('id', part_no)}/image/{img_id}"
+                                else:
+                                    image = images_list[0].get("url")
                         except Exception:
                             name = part_no
 
@@ -218,7 +224,7 @@ async def view_invoice(order_id: str, current_user: UserInDB = Depends(get_curre
     return await spire_client.get_sales_order_invoice(order_id)
 
 @router.post("/{order_id}/repeat")
-async def repeat_purchase(order_id: str, current_user: UserInDB = Depends(get_current_user)):
+async def repeat_purchase(order_id: str, request: Request, current_user: UserInDB = Depends(get_current_user)):
     try:
         # Fetch the old order from Spire
         old_order = await spire_client.get_sales_order(order_id)
@@ -240,9 +246,15 @@ async def repeat_purchase(order_id: str, current_user: UserInDB = Depends(get_cu
                 try:
                     product = await spire_client.get_product(part_no)
                     name = product.get("description") or name
-                    images = product.get("images", [])
-                    if isinstance(images, list) and len(images) > 0:
-                        image = images[0].get("url")
+                    images_obj = product.get("images")
+                    images_list = images_obj.get("records", []) if isinstance(images_obj, dict) else (images_obj if isinstance(images_obj, list) else [])
+                    if len(images_list) > 0:
+                        img_id = images_list[0].get("id")
+                        if img_id:
+                            base_url = str(request.base_url).rstrip('/')
+                            image = f"{base_url}/api/products/{product.get('id', part_no)}/image/{img_id}"
+                        else:
+                            image = images_list[0].get("url")
                 except Exception:
                     pass
 
