@@ -34,7 +34,7 @@ class SpireClient:
                 raise HTTPException(status_code=500, detail=f"Failed to connect to Spire API: {str(e)}")
 
     async def get_products(self, limit: int = 100, start: int = 0, group_no: str = None, department_code: str = None, q: str = None):
-        params = {"limit": limit, "start": start, "embed": "images"}
+        params = {"limit": limit, "start": start, "embed": ["images", "inventory.images"]}
         if q:
             params["q"] = q
             
@@ -58,13 +58,9 @@ class SpireClient:
         return await self._request("GET", "inventory/sales_departments/", params={"limit": 0})
 
     async def get_product(self, product_id: str):
-        return await self._request("GET", f"inventory/items/{product_id}", params={"embed": "images"})
-        
-    async def get_product_images(self, product_id: str):
-        return await self._request("GET", f"inventory/items/{product_id}/images")
+        return await self._request("GET", f"inventory/items/{product_id}", params={"embed": ["images", "inventory.images"]})
 
-    async def get_product_image_data(self, product_id: str, image_id: str):
-        url = f"{self.base_url}inventory/items/{product_id}/images/{image_id}/data"
+    async def get_image_data_from_url(self, url: str):
         headers = self.auth_header.copy()
         async with httpx.AsyncClient(follow_redirects=True) as client:
             try:

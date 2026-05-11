@@ -52,10 +52,15 @@ def is_product_active(product_data: dict) -> bool:
 
 def normalize_product_data(record: dict, request: Request = None) -> dict:
     inv = record.get("inventory", {})
-    images_obj = record.get("images") or inv.get("images")
     
-    # Extraer el array real de imágenes, ya sea que venga como una lista plana o como un objeto de colección Spire {"records": [...]}
-    images_list = images_obj.get("records", []) if isinstance(images_obj, dict) else (images_obj if isinstance(images_obj, list) else [])
+    # Unificamos ambas listas de imágenes para nunca perder las del inventario base
+    item_img_obj = record.get("images")
+    inv_img_obj = inv.get("images")
+    
+    item_images = item_img_obj.get("records", []) if isinstance(item_img_obj, dict) else (item_img_obj if isinstance(item_img_obj, list) else [])
+    inv_images = inv_img_obj.get("records", []) if isinstance(inv_img_obj, dict) else (inv_img_obj if isinstance(inv_img_obj, list) else [])
+    
+    images_list = item_images + inv_images
         
     part_no = record.get("id", record.get("partNo"))
     if not part_no and inv:
@@ -227,27 +232,41 @@ async def get_product(product_id: str, request: Request):
 @router.get("/{product_id}/image")
 @router.get("/{product_id}/image/{image_id}")
 async def get_product_image(product_id: str, image_id: Optional[str] = None):
-    if not image_id:
-        try:
-            images_res = await spire_client.get_product_images(product_id)
-            records = images_res.get("records", [])
-            if not records:
-                raise HTTPException(status_code=404, detail="No image found for this product")
-            image_id = str(records[0]["id"])
-        except HTTPException:
-            raise
-        except Exception as e:
-            raise HTTPException(status_code=500, detail=str(e))
+    try:
+        product = await spire_client.get_product(product_id)
+        inv = product.get("inventory", {})
+        
+        item_img_obj = product.get("images")
+        inv_img_obj = inv.get("images")
+        
+        item_images = item_img_obj.get("records", []) if isinstance(item_img_obj, dict) else (item_img_obj if isinstance(item_img_obj, list) else [])
+        inv_images = inv_img_obj.get("records", []) if isinstance(inv_img_obj, dict) else (inv_img_obj if isinstance(inv_img_obj, list) else [])
+        
+        all_images = item_images + inv_images
+        
+        if not all_images:
+            raise HTTPException(status_code=404, detail="No image found for this product")
             
-    content, content_type = await spire_client.get_product_image_data(product_id, image_id)
-    
-    # --- Log de la imagen en base64 en la terminal ---
-    # b64_image = base64.b64encode(content).decode('utf-8')
-    # print(f"\n--- INICIO BASE64 IMAGEN (Producto: {product_id}, Imagen: {image_id}) ---")
-    # print(f"data:{content_type};base64,{b64_image}")
-    # print("--- FIN BASE64 IMAGEN ---\n")
-
-    return Response(content=content, media_type=content_type)
+        target_image = None
+        if image_id:
+            target_image = next((img for img in all_images if str(img.get("id")) == str(image_id)), None)
+            
+        if not target_image:
+            target_image = all_images[0]
+            
+        links = target_image.get("links", {})
+        data_url = links.get("data")
+        
+        if not data_url:
+            img_id = target_image.get("id")
+            data_url = f"{spire_client.base_url}inventory/items/{product_id}/images/{img_id}/data"
+            
+        content, content_type = await spire_client.get_image_data_from_url(data_url)
+        return Response(content=content, media_type=content_type)
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
 
 @router.get("/{product_id}/pricing")
 async def get_special_pricing(product_id: str, current_user: UserInDB = Depends(get_current_user)):

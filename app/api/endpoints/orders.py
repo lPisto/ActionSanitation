@@ -186,18 +186,11 @@ async def get_order_history(request: Request, current_user: UserInDB = Depends(g
                     # Si es una orden antigua y la BD local no tiene el nombre, consultamos al inventario de Spire
                     if not name:
                         try:
+                            from app.api.endpoints.products import normalize_product_data
                             product = await spire_client.get_product(part_no)
+                            product = normalize_product_data(product, request)
                             name = product.get("description") or part_no
-                            
-                            images_obj = product.get("images")
-                            images_list = images_obj.get("records", []) if isinstance(images_obj, dict) else (images_obj if isinstance(images_obj, list) else [])
-                            if len(images_list) > 0:
-                                img_id = images_list[0].get("id")
-                                if img_id:
-                                    base_url = str(request.base_url).rstrip('/')
-                                    image = f"{base_url}/api/products/{product.get('id', part_no)}/image/{img_id}"
-                                else:
-                                    image = images_list[0].get("url")
+                            image = product.get("image")
                         except Exception:
                             name = part_no
 
@@ -244,17 +237,11 @@ async def repeat_purchase(order_id: str, request: Request, current_user: UserInD
                 
                 # Intentamos recuperar el producto desde el inventario para obtener la imagen y nombre real
                 try:
+                    from app.api.endpoints.products import normalize_product_data
                     product = await spire_client.get_product(part_no)
+                    product = normalize_product_data(product, request)
                     name = product.get("description") or name
-                    images_obj = product.get("images")
-                    images_list = images_obj.get("records", []) if isinstance(images_obj, dict) else (images_obj if isinstance(images_obj, list) else [])
-                    if len(images_list) > 0:
-                        img_id = images_list[0].get("id")
-                        if img_id:
-                            base_url = str(request.base_url).rstrip('/')
-                            image = f"{base_url}/api/products/{product.get('id', part_no)}/image/{img_id}"
-                        else:
-                            image = images_list[0].get("url")
+                    image = product.get("image")
                 except Exception:
                     pass
 
