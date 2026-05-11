@@ -10,6 +10,9 @@ class SpireClient:
         self.username = settings.SPIRE_USERNAME
         self.password = settings.SPIRE_PASSWORD
         self.auth_header = self._get_auth_header()
+        self._image_cache = {}
+        self._image_cache_keys = []
+        self._MAX_IMAGE_CACHE = 200 # Límite de imágenes cacheadas en memoria RAM
 
     def _get_auth_header(self):
         credentials = f"{self.username}:{self.password}"
@@ -61,12 +64,24 @@ class SpireClient:
         return await self._request("GET", f"inventory/items/{product_id}", params={"embed": ["images", "inventory.images"]})
 
     async def get_image_data_from_url(self, url: str):
+        if url in self._image_cache:
+            return self._image_cache[url]
+            
         headers = self.auth_header.copy()
         async with httpx.AsyncClient(follow_redirects=True) as client:
             try:
                 response = await client.get(url, headers=headers)
                 response.raise_for_status()
-                return response.content, response.headers.get("Content-Type", "image/jpeg")
+                result = (response.content, response.headers.get("Content-Type", "image/jpeg"))
+                
+                if url not in self._image_cache:
+                    self._image_cache[url] = result
+                    self._image_cache_keys.append(url)
+                    if len(self._image_cache_keys) > self._MAX_IMAGE_CACHE:
+                        oldest = self._image_cache_keys.pop(0)
+                        self._image_cache.pop(oldest, None)
+                        
+                return result
             except httpx.HTTPStatusError as e:
                 raise HTTPException(status_code=e.response.status_code, detail="Spire API error fetching image")
             except httpx.RequestError as e:

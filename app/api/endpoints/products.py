@@ -262,7 +262,11 @@ async def get_product_image(product_id: str, image_id: Optional[str] = None):
             data_url = f"{spire_client.base_url}inventory/items/{product_id}/images/{img_id}/data"
             
         content, content_type = await spire_client.get_image_data_from_url(data_url)
-        return Response(content=content, media_type=content_type)
+        return Response(
+            content=content, 
+            media_type=content_type,
+            headers={"Cache-Control": "public, max-age=86400"} # Cachear 24 horas en el navegador
+        )
     except HTTPException:
         raise
     except Exception as e:
