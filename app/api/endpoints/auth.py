@@ -6,6 +6,10 @@ from app.core.security import verify_password, get_password_hash, create_access_
 from app.services.spire_client import spire_client
 from app.db.mongodb import get_database
 import uuid
+import secrets
+from datetime import datetime, timedelta
+from pydantic import BaseModel
+from app.services.email_service import send_password_reset_email
 
 router = APIRouter()
 
@@ -13,6 +17,14 @@ oauth2_scheme = OAuth2PasswordBearer(tokenUrl="/api/auth/login")
 
 def truncate(value: str, max_length: int):
     return value[:max_length] if value else value
+
+class ForgotPasswordRequest(BaseModel):
+    email: str
+
+class ResetPasswordRequest(BaseModel):
+    email: str
+    otp: str
+    new_password: str
 
 @router.post("/register", response_model=UserInDB)
 async def register(user_in: UserCreate):
@@ -107,3 +119,61 @@ async def login(form_data: OAuth2PasswordRequestForm = Depends()):
 
     access_token = create_access_token(subject=form_data.username)
     return {"access_token": access_token, "token_type": "bearer"}
+
+@router.post("/forgot-password")
+async def forgot_password(req: ForgotPasswordRequest):
+    db = get_database()
+    user_record = await db["users"].find_one({"email": req.email})
+    
+    if not user_record:
+        raise HTTPException(status_code=404, detail="User with this email not found")
+
+    # Generamos un OTP de 6 dígitos de forma criptográficamente segura
+    otp = "".join([str(secrets.choice(range(10))) for _ in range(6)])
+    expiry = datetime.utcnow() + timedelta(minutes=15)
+
+    # Lo guardamos temporalmente en el documento del usuario en MongoDB
+    await db["users"].update_one(
+        {"email": req.email},
+        {"$set": {"reset_otp": otp, "reset_otp_expiry": expiry.isoformat()}}
+    )
+
+    try:
+        await send_password_reset_email(req.email, otp)
+    except Exception as e:
+        print(f"Error sending OTP email: {e}")
+        raise HTTPException(status_code=500, detail="Failed to send email. Please try again later.")
+
+    return {"message": "OTP sent to email"}
+
+@router.post("/reset-password")
+async def reset_password(req: ResetPasswordRequest):
+    db = get_database()
+    user_record = await db["users"].find_one({"email": req.email})
+    
+    if not user_record:
+        raise HTTPException(status_code=404, detail="User not found")
+
+    stored_otp = user_record.get("reset_otp")
+    stored_expiry_str = user_record.get("reset_otp_expiry")
+    
+    if not stored_otp or not stored_expiry_str:
+        raise HTTPException(status_code=400, detail="No OTP requested for this email")
+        
+    if stored_otp != req.otp:
+        raise HTTPException(status_code=400, detail="Invalid verification code")
+        
+    stored_expiry = datetime.fromisoformat(stored_expiry_str)
+    if datetime.utcnow() > stored_expiry:
+        raise HTTPException(status_code=400, detail="Verification code has expired")
+
+    hashed_password = get_password_hash(req.new_password)
+    await db["users"].update_one(
+        {"email": req.email},
+        {
+            "$set": {"hashed_password": hashed_password},
+            "$unset": {"reset_otp": "", "reset_otp_expiry": ""}
+        }
+    )
+
+    return {"message": "Password reset successfully"}

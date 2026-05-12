@@ -97,3 +97,33 @@ async def send_newsletter_notification_email(subscriber_email: str):
     
     fm = FastMail(conf)
     await fm.send_message(message_schema)
+
+async def send_password_reset_email(to_email: str, otp: str):
+    if not settings.MAIL_USERNAME:
+        print("Email not configured, skipping password reset send.")
+        print(f"To: {to_email}, OTP: {otp}")
+        return
+        
+    html = f"""
+    <div style="font-family: Arial, sans-serif; max-width: 600px; margin: auto; color: #333;">
+        <h2 style="color: #2563eb;">Password Reset Request</h2>
+        <p>You recently requested to reset your password for your Action Sanitation account.</p>
+        <p>Your 6-digit verification code is:</p>
+        <div style="background-color: #f3f4f6; padding: 16px; text-align: center; font-size: 24px; font-weight: bold; letter-spacing: 6px; border-radius: 6px; margin: 24px 0;">
+            {otp}
+        </div>
+        <p>This code will expire in 15 minutes. If you did not request a password reset, please ignore this email.</p>
+        <br>
+        <p>Best regards,<br><strong>Action Sanitation</strong></p>
+    </div>
+    """
+
+    message_schema = MessageSchema(
+        subject="Password Reset Code - Action Sanitation",
+        recipients=[to_email],
+        body=html,
+        subtype="html"
+    )
+
+    fm = FastMail(conf)
+    await fm.send_message(message_schema)
