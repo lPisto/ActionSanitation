@@ -119,12 +119,13 @@ def normalize_product_data(record: dict, request: Request = None) -> dict:
 @router.get("/")
 async def get_products(
     request: Request,
-    limit: int = 100, 
+    limit: int = 0, 
     start: int = 0, 
     skip: Optional[int] = None, 
     group: Optional[str] = None, 
     department: Optional[str] = None,
     category: Optional[str] = None,
+    search: Optional[str] = None,
     on_sale: Optional[bool] = None
 ):
     actual_start = skip if skip is not None else start
@@ -145,7 +146,7 @@ async def get_products(
             "limit": limit
         }
 
-    q_param = None
+    q_param = search
     final_group = None
     final_dept = None
     
@@ -160,7 +161,7 @@ async def get_products(
         elif department.lower() == "sanitation":
             final_group = "SAN"
         else:
-            q_param = department
+            if not q_param: q_param = department
 
     # 2. Handle Group
     if group:
@@ -172,14 +173,14 @@ async def get_products(
         elif group.lower() == "sanitation":
             final_group = "SAN"
         else:
-            q_param = group
+            if not q_param: q_param = group
 
     # 3. Handle Category (always text search)
     if category:
-        q_param = category
+        if not q_param: q_param = category
 
     # 4. Refine q_param for Spire (first word, handle plurals)
-    if q_param:
+    if q_param and not search:
         first_word = q_param.split()[0]
         
         # Plural mappings
@@ -273,8 +274,10 @@ async def get_product_image(product_id: str, image_id: Optional[str] = None):
         raise HTTPException(status_code=500, detail=str(e))
 
 @router.get("/{product_id}/pricing")
-async def get_special_pricing(product_id: str, current_user: UserInDB = Depends(get_current_user)):
+async def get_special_pricing(product_id: str, response: Response, current_user: UserInDB = Depends(get_current_user)):
     # Fetch negotiated price for this specific customer
+    # Garantizamos que los precios especiales nunca se guarden en caché para evitar interferir con el carrito o checkout
+    response.headers["Cache-Control"] = "no-store, no-cache, must-revalidate, max-age=0"
     try:
         pricing = await spire_client.get_customer_pricing(current_user.spire_customer_no, product_id)
         return {"product_id": product_id, "special_price": pricing.get("price"), "currency": pricing.get("currency")}

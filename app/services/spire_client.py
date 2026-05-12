@@ -36,7 +36,7 @@ class SpireClient:
             except httpx.RequestError as e:
                 raise HTTPException(status_code=500, detail=f"Failed to connect to Spire API: {str(e)}")
 
-    async def get_products(self, limit: int = 100, start: int = 0, group_no: str = None, department_code: str = None, q: str = None):
+    async def get_products(self, limit: int = 0, start: int = 0, group_no: str = None, department_code: str = None, q: str = None):
         params = {"limit": limit, "start": start, "embed": ["images", "inventory.images"]}
         if q:
             params["q"] = q
@@ -111,7 +111,7 @@ class SpireClient:
         # Spire API no soporta facilmente filtros OR de fecha nula o mayor en la URL, 
         # así que traemos las globales y filtramos en Python por simplicidad o usamos un filtro básico.
         filter_query = json.dumps({"customerNo": None})
-        res = await self._request("GET", "inventory/price_matrix/", params={"filter": filter_query, "limit": 100, "embed": "inventory.images"})
+        res = await self._request("GET", "inventory/price_matrix/", params={"filter": filter_query, "limit": 0, "embed": "inventory.images"})
         
         valid_deals = []
         for record in res.get("records", []):
@@ -134,7 +134,7 @@ class SpireClient:
         
     async def get_customer_orders(self, customer_no: str):
         # Alternativa: Usamos el buscador global "q" para evitar los errores 500 del parámetro "filter"
-        res = await self._request("GET", "sales/orders/", params={"q": customer_no, "limit": 100})
+        res = await self._request("GET", "sales/orders/", params={"q": customer_no, "limit": 0})
         
         # Filtramos internamente con Python para garantizar que coincida el código de cliente exacto
         filtered_records = [
