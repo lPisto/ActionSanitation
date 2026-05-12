@@ -14,7 +14,7 @@ def is_product_active(product_data: dict) -> bool:
     if not description:
         description = product_data.get("description", "")
     
-    if "*" in description or "discontinued" in description.lower():
+    if "*" in description or "discontinued" in description.lower() or "do not use" in description.lower():
         return False
         
     # Extraer el precio dependiendo de si es una oferta o un producto regular de inventario
