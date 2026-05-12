@@ -126,7 +126,8 @@ async def get_products(
     department: Optional[str] = None,
     category: Optional[str] = None,
     search: Optional[str] = None,
-    on_sale: Optional[bool] = None
+    on_sale: Optional[bool] = None,
+    sort: Optional[str] = None
 ):
     actual_start = skip if skip is not None else start
     
@@ -202,7 +203,8 @@ async def get_products(
         start=actual_start, 
         group_no=final_group, 
         department_code=final_dept,
-        q=q_param
+        q=q_param,
+        sort=sort
     )
 
     # Normalize response to match detail endpoint structure expected by the frontend
