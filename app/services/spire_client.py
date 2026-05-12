@@ -104,6 +104,20 @@ class SpireClient:
         filter_query = json.dumps({"customerNo": customer_no, "partNo": product_id})
         return await self._request("GET", "inventory/price_matrix/", params={"filter": filter_query})
 
+    async def get_customer_all_pricing(self, customer_no: str):
+        # Obtiene todas las reglas de precios especiales para un cliente
+        filter_query = json.dumps({"customerNo": customer_no})
+        res = await self._request("GET", "inventory/price_matrix/", params={"filter": filter_query, "limit": 0})
+        pricing_map = {}
+        for record in res.get("records", []):
+            part_no = record.get("partNo")
+            amount = record.get("amount")
+            if amount is None:
+                amount = record.get("price")
+            if part_no and amount is not None:
+                pricing_map[part_no] = float(amount)
+        return pricing_map
+
     async def get_deals(self):
         # En Spire, las ofertas globales se guardan en la Price Matrix con el customerNo en null
         from datetime import datetime

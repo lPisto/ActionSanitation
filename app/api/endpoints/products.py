@@ -1,7 +1,7 @@
 from fastapi import APIRouter, Depends, Query, Response, HTTPException, Request
 import base64
 from app.services.spire_client import spire_client
-from app.api.deps import get_current_user
+from app.api.deps import get_current_user, get_optional_current_user
 from app.models.user import UserInDB
 from typing import Optional
 
@@ -14,7 +14,7 @@ def is_product_active(product_data: dict) -> bool:
     if not description:
         description = product_data.get("description", "")
     
-    if "*" in description or "discontinued" in description.lower() or "do not use" in description.lower():
+    if "*" in description or "discontinued" in description.lower() or "do not use" in description.lower() or "disc" in description.lower():
         return False
         
     # Extraer el precio dependiendo de si es una oferta o un producto regular de inventario
@@ -50,7 +50,7 @@ def is_product_active(product_data: dict) -> bool:
         
     return True
 
-def normalize_product_data(record: dict, request: Request = None) -> dict:
+def normalize_product_data(record: dict, request: Request = None, customer_pricing: dict = None) -> dict:
     inv = record.get("inventory", {})
     
     # Unificamos ambas listas de imágenes para nunca perder las del inventario base
@@ -65,6 +65,10 @@ def normalize_product_data(record: dict, request: Request = None) -> dict:
     part_no = record.get("id", record.get("partNo"))
     if not part_no and inv:
         part_no = inv.get("id", inv.get("partNo"))
+        
+    actual_part_no = record.get("partNo")
+    if not actual_part_no and inv:
+        actual_part_no = inv.get("partNo")
         
     record["image"] = None
     normalized_images = []
@@ -109,9 +113,39 @@ def normalize_product_data(record: dict, request: Request = None) -> dict:
         
     # Normalizar Precios
     pricing = record.get("pricing") or inv.get("pricing")
-    if pricing and "sellPrice" in pricing:
-        sell_prices = pricing["sellPrice"]
-        record["pricing"] = {measure_code: {"sellPrices": sell_prices}}
+    sell_prices = []
+    
+    if pricing:
+        if "sellPrice" in pricing:
+            sell_prices = [float(p) if p else 0.0 for p in pricing["sellPrice"]]
+            record["pricing"] = {measure_code: {"sellPrices": sell_prices}}
+        else:
+            for m_code, m_data in pricing.items():
+                if isinstance(m_data, dict) and "sellPrices" in m_data:
+                    float_prices = [float(p) if p else 0.0 for p in m_data["sellPrices"]]
+                    m_data["sellPrices"] = float_prices
+                    if m_code == measure_code:
+                        sell_prices = float_prices
+
+    for field in ["price", "currentCost", "averageCost", "standardCost", "list_price", "sale_price"]:
+        if field in record and record[field] is not None:
+            try:
+                record[field] = float(record[field])
+            except (ValueError, TypeError):
+                pass
+
+    # Apply special customer pricing if provided
+    if customer_pricing and actual_part_no and actual_part_no in customer_pricing:
+        special_price = float(customer_pricing[actual_part_no])
+        # Set sale_price to force the frontend to show it as the active price
+        record["sale_price"] = special_price
+        # Set on_sale to ensure the UI badges it properly
+        record["on_sale"] = True
+        
+        # Try to calculate list_price for the strikethrough if not already there
+        if "list_price" not in record:
+            if sell_prices and len(sell_prices) > 0:
+                record["list_price"] = sell_prices[0]
 
     return record
 
@@ -127,9 +161,14 @@ async def get_products(
     category: Optional[str] = None,
     search: Optional[str] = None,
     on_sale: Optional[bool] = None,
-    sort: Optional[str] = None
+    sort: Optional[str] = None,
+    current_user: Optional[UserInDB] = Depends(get_optional_current_user)
 ):
     actual_start = skip if skip is not None else start
+    
+    customer_pricing = {}
+    if current_user and current_user.spire_customer_no:
+        customer_pricing = await spire_client.get_customer_all_pricing(current_user.spire_customer_no)
     
     if on_sale:
         deals = await spire_client.get_deals()
@@ -137,7 +176,7 @@ async def get_products(
         deals = [d for d in deals if is_product_active(d)]
         
         for d in deals:
-            normalize_product_data(d, request)
+            normalize_product_data(d, request, customer_pricing)
             
         # Pagination for deals
         return {
@@ -213,7 +252,7 @@ async def get_products(
         res["records"] = [r for r in res["records"] if is_product_active(r)]
         
         for record in res["records"]:
-            normalize_product_data(record, request)
+            normalize_product_data(record, request, customer_pricing)
 
     return res
 
@@ -228,9 +267,26 @@ async def get_departments():
     return await spire_client.get_sales_departments()
 
 @router.get("/{product_id}")
-async def get_product(product_id: str, request: Request):
+async def get_product(product_id: str, request: Request, current_user: Optional[UserInDB] = Depends(get_optional_current_user)):
     product = await spire_client.get_product(product_id)
-    return normalize_product_data(product, request)
+    
+    customer_pricing = {}
+    if current_user and current_user.spire_customer_no:
+        try:
+            actual_part_no = product.get("partNo") or product.get("inventory", {}).get("partNo") or product_id
+            
+            # We can use get_customer_pricing for single product optimization or just pull it
+            pricing_data = await spire_client.get_customer_pricing(current_user.spire_customer_no, actual_part_no)
+            records = pricing_data.get("records", []) if isinstance(pricing_data, dict) else (pricing_data if isinstance(pricing_data, list) else [])
+            if records and len(records) > 0:
+                record = records[0]
+                amount = record.get("amount") if record.get("amount") is not None else record.get("price")
+                if amount is not None:
+                    customer_pricing[actual_part_no] = float(amount)
+        except Exception:
+            pass
+
+    return normalize_product_data(product, request, customer_pricing)
 
 @router.get("/{product_id}/image")
 @router.get("/{product_id}/image/{image_id}")
@@ -281,11 +337,28 @@ async def get_special_pricing(product_id: str, response: Response, current_user:
     # Garantizamos que los precios especiales nunca se guarden en caché para evitar interferir con el carrito o checkout
     response.headers["Cache-Control"] = "no-store, no-cache, must-revalidate, max-age=0"
     try:
-        pricing = await spire_client.get_customer_pricing(current_user.spire_customer_no, product_id)
-        return {"product_id": product_id, "special_price": pricing.get("price"), "currency": pricing.get("currency")}
-    except Exception as e:
-        # Fallback if no special pricing exists
+        pricing_data = await spire_client.get_customer_pricing(current_user.spire_customer_no, product_id)
+        
+        # Spire returns a list of records for the price matrix
+        records = pricing_data.get("records", []) if isinstance(pricing_data, dict) else (pricing_data if isinstance(pricing_data, list) else [])
+        
+        if records and len(records) > 0:
+            record = records[0]
+            
+            # The special price is often stored in the 'amount' field in the price matrix
+            special_price = record.get("amount")
+            if special_price is None:
+                special_price = record.get("price")
+                
+            currency_info = record.get("currency", {})
+            currency_code = currency_info.get("code") if isinstance(currency_info, dict) else None
+            
+            return {"product_id": product_id, "special_price": special_price, "currency": currency_code}
+            
         return {"product_id": product_id, "special_price": None, "message": "No special pricing found"}
+    except Exception as e:
+        # Fallback if no special pricing exists or an error occurs
+        return {"product_id": product_id, "special_price": None, "message": str(e)}
 
 @router.get("/deals/all")
 async def get_deals(request: Request):
