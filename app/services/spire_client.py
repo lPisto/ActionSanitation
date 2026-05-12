@@ -90,13 +90,20 @@ class SpireClient:
                 raise HTTPException(status_code=500, detail="Failed to connect to Spire API for image")
 
     async def get_customer(self, customer_no: str):
-        return await self._request("GET", f"customers/{customer_no}")
+        filter_query = json.dumps({"customerNo": customer_no})
+        res = await self._request("GET", "customers/", params={"filter": filter_query})
+        records = res.get("records", [])
+        if not records:
+            raise HTTPException(status_code=404, detail="Customer not found in Spire")
+        return records[0]
 
     async def create_customer(self, customer_data: dict):
         return await self._request("POST", "customers/", json=customer_data)
         
     async def update_customer(self, customer_no: str, customer_data: dict):
-        return await self._request("PUT", f"customers/{customer_no}", json=customer_data)
+        customer = await self.get_customer(customer_no)
+        customer_id = customer.get("id")
+        return await self._request("PUT", f"customers/{customer_id}", json=customer_data)
 
     async def get_customer_pricing(self, customer_no: str, product_id: str):
         # Spire stores customer special pricing in the Inventory Price Matrix
