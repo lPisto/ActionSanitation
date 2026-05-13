@@ -97,6 +97,13 @@ class SpireClient:
             raise HTTPException(status_code=404, detail="Customer not found in Spire")
         return records[0]
 
+    async def get_customer_by_email(self, email: str):
+        res = await self._request("GET", "customers/", params={"q": email})
+        for record in res.get("records", []):
+            if record.get("address", {}).get("email", "").lower() == email.lower():
+                return record
+        return None
+
     async def create_customer(self, customer_data: dict):
         return await self._request("POST", "customers/", json=customer_data)
         

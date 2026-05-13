@@ -37,47 +37,56 @@ async def register(user_in: UserCreate):
     if existing_user:
         raise HTTPException(status_code=400, detail="Email already registered")
 
-    # Generate a unique customer number for Spire
-    generated_customer_no = f"W{uuid.uuid4().hex[:9]}".upper()
-
-    # 1. Map user_in to Spire Customer format
-    spire_customer_data = {
-        "customerNo": truncate(generated_customer_no, 12),
-        "name": truncate(f"{user_in.first_name} {user_in.last_name}", 40),
-        "status": "A",
-        "address": {
-            "name": truncate(f"{user_in.first_name} {user_in.last_name}", 40),
-            "city": truncate(user_in.city, 30),
-            "line1": truncate(user_in.street_address, 50),
-            "postalCode": truncate(user_in.zip, 10),
-            "provState": truncate(user_in.state_province, 20),
-            "country": truncate(user_in.country, 3).upper() if user_in.country else "",
-            "email": truncate(user_in.email, 50),
-            "phone": {
-                "number": truncate(user_in.phone_number, 20)
-            },
-            "contacts": [
-                {
-                    "name": truncate(f"{user_in.first_name} {user_in.last_name}", 40),
-                    "email": truncate(user_in.email, 50),
-                    "phone": {
-                        "number": truncate(user_in.phone_number, 20)
-                    }
-                }
-            ]
-        }
-    }
-    
-    # 2. Create customer in Spire ERP
     try:
-        spire_response = await spire_client.create_customer(spire_customer_data)
-        # Assuming Spire returns the generated customer number (e.g. 'customerNo')
-        spire_customer_no = spire_response.get("customerNo", generated_customer_no)
-    except HTTPException as e:
-        # Pasa el error HTTP lanzado por nuestro spire_client directamente al frontend
-        raise HTTPException(status_code=400, detail=f"Spire ERP Error: {e.detail}")
+        spire_customer = await spire_client.get_customer_by_email(user_in.email)
     except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Unexpected error communicating with Spire: {str(e)}")
+        print(f"Error checking Spire for existing customer: {e}")
+        spire_customer = None
+
+    if spire_customer:
+        spire_customer_no = spire_customer.get("customerNo")
+    else:
+        # Generate a unique customer number for Spire
+        generated_customer_no = f"W{uuid.uuid4().hex[:9]}".upper()
+
+        # 1. Map user_in to Spire Customer format
+        spire_customer_data = {
+            "customerNo": truncate(generated_customer_no, 12),
+            "name": truncate(f"{user_in.first_name} {user_in.last_name}", 40),
+            "status": "A",
+            "address": {
+                "name": truncate(f"{user_in.first_name} {user_in.last_name}", 40),
+                "city": truncate(user_in.city, 30),
+                "line1": truncate(user_in.street_address, 50),
+                "postalCode": truncate(user_in.zip, 10),
+                "provState": truncate(user_in.state_province, 20),
+                "country": truncate(user_in.country, 3).upper() if user_in.country else "",
+                "email": truncate(user_in.email, 50),
+                "phone": {
+                    "number": truncate(user_in.phone_number, 20)
+                },
+                "contacts": [
+                    {
+                        "name": truncate(f"{user_in.first_name} {user_in.last_name}", 40),
+                        "email": truncate(user_in.email, 50),
+                        "phone": {
+                            "number": truncate(user_in.phone_number, 20)
+                        }
+                    }
+                ]
+            }
+        }
+        
+        # 2. Create customer in Spire ERP
+        try:
+            spire_response = await spire_client.create_customer(spire_customer_data)
+            # Assuming Spire returns the generated customer number (e.g. 'customerNo')
+            spire_customer_no = spire_response.get("customerNo", generated_customer_no)
+        except HTTPException as e:
+            # Pasa el error HTTP lanzado por nuestro spire_client directamente al frontend
+            raise HTTPException(status_code=400, detail=f"Spire ERP Error: {e.detail}")
+        except Exception as e:
+            raise HTTPException(status_code=500, detail=f"Unexpected error communicating with Spire: {str(e)}")
 
     # 3. Save to local DB (MongoDB)
     user_count = await db["users"].count_documents({})
