@@ -1,9 +1,20 @@
 from fastapi import APIRouter, Depends, Query, Response, HTTPException, Request
 import base64
+import os
+import json
 from app.services.spire_client import spire_client
 from app.api.deps import get_current_user, get_optional_current_user
 from app.models.user import UserInDB
 from typing import Optional
+
+SKU_MAPPING = {}
+try:
+    mapping_path = os.path.join(os.path.dirname(__file__), "../../../sku_mapping.json")
+    if os.path.exists(mapping_path):
+        with open(mapping_path, "r", encoding="utf-8") as f:
+            SKU_MAPPING = json.load(f)
+except Exception as e:
+    print(f"Error loading SKU mapping: {e}")
 
 router = APIRouter()
 
@@ -190,52 +201,16 @@ async def get_products(
     final_group = None
     final_dept = None
     
-    # 1. Handle Department
-    if department:
-        # If it's a number like "21", it's a Spire exact department code
-        if department.isdigit():
-            final_dept = department
-        # Map known text to exact group (legacy support)
-        elif department.lower() == "detailing":
-            final_group = "DET"
-        elif department.lower() == "sanitation":
-            final_group = "SAN"
-        else:
-            if not q_param: q_param = department
+    # 1. Direct Spire code mappings (for backward compatibility if digits/short codes are sent)
+    if department and department.isdigit():
+        final_dept = department
+    
+    if group and len(group) <= 4 and group.isupper():
+        final_group = group
 
-    # 2. Handle Group
-    if group:
-        # If it's an exact Spire group code (e.g. DET, DG02, SAN)
-        if len(group) <= 4 and group.isupper():
-            final_group = group
-        elif group.lower() == "detailing":
-            final_group = "DET"
-        elif group.lower() == "sanitation":
-            final_group = "SAN"
-        else:
-            if not q_param: q_param = group
-
-    # 3. Handle Category (always text search)
-    if category:
-        if not q_param: q_param = category
-
-    # 4. Refine q_param for Spire (first word, handle plurals)
-    if q_param and not search:
-        first_word = q_param.split()[0]
-        
-        # Plural mappings
-        if first_word.lower() == "accessories":
-            q_param = "Accessory"
-        elif first_word.lower() == "chemicals":
-            q_param = "Chemical"
-        elif first_word.lower() == "aerosols":
-            q_param = "Aerosol"
-        elif first_word.lower() == "brooms":
-            q_param = "Broom"
-        elif first_word.lower() == "brushes":
-            q_param = "Brush"
-        else:
-            q_param = first_word
+    # 2. Add text search (only if explicit search param or if native code mappings failed)
+    if not q_param and search:
+        q_param = search
 
     res = await spire_client.get_products(
         limit=limit, 
@@ -251,8 +226,41 @@ async def get_products(
         # Filter out records with '*' or 'discontinued' in the description
         res["records"] = [r for r in res["records"] if is_product_active(r)]
         
+        # Mapeo y filtrado en base al archivo JSON para el frontend
+        filtered_records = []
+        
         for record in res["records"]:
+            actual_part_no = record.get("partNo") or record.get("inventory", {}).get("partNo") or record.get("id")
+            
+            # Asignar categorías desde el JSON
+            cats = SKU_MAPPING.get(actual_part_no, [])
+            record["frontend_categories"] = cats
+            
             normalize_product_data(record, request, customer_pricing)
+            
+            # Lógica de filtrado en memoria
+            # Si el cliente está filtrando usando códigos directos de Spire (final_dept/final_group) o búsqueda de texto (q_param), 
+            # Spire ya filtró. Pero si usamos los nombres textuales del frontend (Detailing, Chemicals, etc), debemos filtrar aquí.
+            
+            include_record = True
+            
+            # Solo filtramos manualmente si NO se usaron como códigos exactos de Spire
+            if department and not final_dept:
+                if not any(c.get("department") == department.lower() for c in cats):
+                    include_record = False
+                    
+            if include_record and group and not final_group:
+                if not any(c.get("group") == group for c in cats):
+                    include_record = False
+                    
+            if include_record and category:
+                if not any(c.get("item") == category for c in cats):
+                    include_record = False
+                    
+            if include_record:
+                filtered_records.append(record)
+                
+        res["records"] = filtered_records
 
     return res
 
@@ -285,6 +293,9 @@ async def get_product(product_id: str, request: Request, current_user: Optional[
                     customer_pricing[actual_part_no] = float(amount)
         except Exception:
             pass
+
+    actual_part_no = product.get("partNo") or product.get("inventory", {}).get("partNo") or product_id
+    product["frontend_categories"] = SKU_MAPPING.get(actual_part_no, [])
 
     return normalize_product_data(product, request, customer_pricing)
 
