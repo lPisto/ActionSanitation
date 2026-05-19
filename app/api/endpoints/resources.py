@@ -1,7 +1,7 @@
 import os
 import uuid
 import shutil
-from fastapi import APIRouter, File, UploadFile, Form, HTTPException
+from fastapi import APIRouter, File, UploadFile, Form, HTTPException, Query, Request
 from typing import List, Optional
 from app.db.mongodb import get_database
 
@@ -13,6 +13,52 @@ CATEGORIES = ["catalogs", "flyers", "sds", "gallery", "training"]
 # Create static directories if they don't exist
 for category in CATEGORIES:
     os.makedirs(f"static/{category}", exist_ok=True)
+
+@router.get("")
+async def get_all_resources(request: Request, type: Optional[str] = None):
+    base_url = str(request.base_url).rstrip('/')
+    db = get_database()
+    category = type
+    if type == "catalog": category = "catalogs"
+    elif type == "flyer": category = "flyers"
+    
+    if category not in CATEGORIES:
+        return []
+        
+    items = await db["resources"].find({"category": category}).to_list(length=None)
+    for item in items:
+        item["_id"] = str(item["_id"])
+        # Normalize title
+        if "name" in item and "title" not in item:
+            item["title"] = item["name"]
+        if "image_url" in item and "url" not in item:
+            item["url"] = item["image_url"]
+        if "video_url" in item and "url" not in item:
+            item["url"] = item["video_url"]
+            
+        if item.get("url") and item["url"].startswith("/"):
+            item["url"] = f"{base_url}{item['url']}"
+
+    # For SDS, append local files that are not in the DB
+    if category == "sds":
+        local_sds = []
+        for root, _, files in os.walk("static/sds"):
+            for file in files:
+                if file.endswith(".pdf"):
+                    # create relative url
+                    rel_url = "/" + os.path.join(root, file).replace("\\", "/")
+                    title = os.path.splitext(file)[0]
+                    # check if already in items
+                    if not any(i.get("url") == f"{base_url}{rel_url}" or i.get("url") == rel_url for i in items):
+                        local_sds.append({
+                            "id": uuid.uuid4().hex[:8],
+                            "category": "sds",
+                            "title": title,
+                            "url": f"{base_url}{rel_url}",
+                        })
+        items.extend(local_sds)
+        
+    return items
 
 # --- GET ENDPOINTS ---
 
@@ -54,6 +100,55 @@ async def get_training_materials():
     items = await db["resources"].find({"category": "training"}).to_list(length=None)
     for item in items:
         item["_id"] = str(item["_id"])
+    return items
+
+# --- VENDOR MSDS BROWSER ENDPOINT ---
+
+@router.get("/vendor-msds")
+async def get_vendor_msds(request: Request, folder: str = Query("")):
+    # Definimos la ruta base de la carpeta dentro de tu directorio "static"
+    base_dir = os.path.abspath(os.path.join(os.getcwd(), "static", "MSDS of Vendors Library"))
+    
+    # Si la carpeta aún no existe, devolvemos una lista vacía
+    if not os.path.exists(base_dir):
+        return []
+        
+    target_dir = os.path.abspath(os.path.join(base_dir, folder))
+    
+    # Seguridad: Prevenir ataques de Directory Traversal (ej. folder="../../../")
+    if not target_dir.startswith(base_dir):
+        raise HTTPException(status_code=400, detail="Ruta de carpeta inválida")
+        
+    if not os.path.exists(target_dir) or not os.path.isdir(target_dir):
+        raise HTTPException(status_code=404, detail="Carpeta no encontrada")
+        
+    items = []
+    base_url = str(request.base_url).rstrip('/')
+    try:
+        for item in os.listdir(target_dir):
+            item_path = os.path.join(target_dir, item)
+            
+            # Si es una carpeta, la agregamos como tipo 'folder'
+            if os.path.isdir(item_path):
+                items.append({
+                    "name": item,
+                    "type": "folder"
+                })
+            else:
+                # Si es un archivo, verificamos que sea un documento válido
+                if item.lower().endswith(('.pdf', '.doc', '.docx', '.xls', '.xlsx')):
+                    rel_path = f"/static/MSDS of Vendors Library/{folder}/{item}" if folder else f"/static/MSDS of Vendors Library/{item}"
+                    rel_path = rel_path.replace("\\", "/").replace("//", "/")
+                    items.append({
+                        "name": item,
+                        "type": "file",
+                        "url": f"{base_url}{rel_path}"
+                    })
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+            
+    # Ordenar: primero las carpetas, luego los archivos (alfabéticamente)
+    items.sort(key=lambda x: (x["type"] == "file", x["name"].lower()))
     return items
 
 # --- UPLOAD (POST) ENDPOINTS ---
