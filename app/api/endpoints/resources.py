@@ -39,24 +39,24 @@ async def get_all_resources(request: Request, type: Optional[str] = None):
         if item.get("url") and item["url"].startswith("/"):
             item["url"] = f"{base_url}{item['url']}"
 
-    # For SDS, append local files that are not in the DB
-    if category == "sds":
-        local_sds = []
-        for root, _, files in os.walk("static/sds"):
+    # Append local files that are not in the DB for specific categories
+    if category in ["sds", "catalogs", "flyers"]:
+        local_files = []
+        for root, _, files in os.walk(f"static/{category}"):
             for file in files:
-                if file.endswith(".pdf"):
+                if file.lower().endswith(".pdf"):
                     # create relative url
                     rel_url = "/" + os.path.join(root, file).replace("\\", "/")
-                    title = os.path.splitext(file)[0]
+                    title = os.path.splitext(file)[0].replace("_", " ")
                     # check if already in items
                     if not any(i.get("url") == f"{base_url}{rel_url}" or i.get("url") == rel_url for i in items):
-                        local_sds.append({
+                        local_files.append({
                             "id": uuid.uuid4().hex[:8],
-                            "category": "sds",
+                            "category": category,
                             "title": title,
                             "url": f"{base_url}{rel_url}",
                         })
-        items.extend(local_sds)
+        items.extend(local_files)
         
     return items
 
