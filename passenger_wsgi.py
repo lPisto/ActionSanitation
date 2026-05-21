@@ -1,11 +1,10 @@
 import os
 import sys
 
-# Añadir el directorio actual al path de Python para que encuentre 'app' y 'main'
-sys.path.insert(0, os.path.dirname(__file__))
+BASE_DIR = os.path.dirname(__file__)
+sys.path.insert(0, BASE_DIR)
 
-from main import app as asgi_app
 from a2wsgi import ASGIMiddleware
+from main import app as fastapi_app
 
-# Phusion Passenger en cPanel busca por defecto un objeto llamado 'application' que sea WSGI
-application = ASGIMiddleware(asgi_app)
+application = ASGIMiddleware(fastapi_app)
