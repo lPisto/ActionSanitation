@@ -22,9 +22,12 @@ app = FastAPI(title="Action Sanitation API", version="1.0.0", lifespan=lifespan)
 
 app.mount("/static", StaticFiles(directory="static"), name="static")
 
+frontend_urls = os.getenv("FRONTEND_URLS", "*")
+allowed_origins = [url.strip() for url in frontend_urls.split(",")] if frontend_urls != "*" else ["*"]
+
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"], # Update this to the React frontend URL in production
+    allow_origins=allowed_origins,
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
