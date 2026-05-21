@@ -7,6 +7,7 @@ import os
 from app.api.endpoints import auth, products, users, orders, resources, contact, stripe_pay, newsletter
 from app.core.config import settings
 from app.db.mongodb import connect_to_mongo, close_mongo_connection
+from fastapi.responses import RedirectResponse
 
 os.makedirs("static", exist_ok=True)
 
@@ -47,6 +48,14 @@ app.include_router(newsletter.router, prefix="/api/newsletter", tags=["newslette
 @app.get("/api/health")
 def health_check():
     return {"status": "ok", "environment": "production"}
+
+@app.get("/")
+def read_root():
+    # Opción 1: Devolver un mensaje simple (descomenta esta línea si prefieres esto)
+    # return {"message": "Welcome to Action Sanitation API"}
+    
+    # Opción 2: Redirigir a la documentación interactiva (recomendado)
+    return RedirectResponse(url="/docs")
 
 if __name__ == "__main__":
     uvicorn.run("main:app", host="0.0.0.0", port=8000, reload=True)
