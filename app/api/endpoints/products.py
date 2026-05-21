@@ -90,10 +90,10 @@ def normalize_product_data(record: dict, request: Request = None, customer_prici
         img_url = None
         img_id = img_data.get("id")
         if img_id and part_no:
-            img_url = f"{base_url}/api/products/{part_no}/image/{img_id}"
+            img_url = f"{base_url}/api/products/{part_no}/image/{img_id}?no_bg=true"
         elif img_data.get("url"):
             img_url = img_data.get("url")
-            
+
         if img_url:
             normalized_images.append(img_url)
 
@@ -101,7 +101,7 @@ def normalize_product_data(record: dict, request: Request = None, customer_prici
         record["image"] = normalized_images[0]
     elif part_no:
         # Fallback a la ruta genérica de imagen por si Spire omitió el embed en la lista
-        record["image"] = f"{base_url}/api/products/{part_no}/image"
+        record["image"] = f"{base_url}/api/products/{part_no}/image?no_bg=true"
         # También lo agregamos a la lista por si el frontend usa 'images[0]' para mostrar la foto principal
         normalized_images.append(record["image"])
         
@@ -301,7 +301,7 @@ async def get_product(product_id: str, request: Request, current_user: Optional[
 
 @router.get("/{product_id}/image")
 @router.get("/{product_id}/image/{image_id}")
-async def get_product_image(product_id: str, image_id: Optional[str] = None):
+async def get_product_image(product_id: str, image_id: Optional[str] = None, no_bg: bool = False):
     try:
         product = await spire_client.get_product(product_id)
         inv = product.get("inventory", {})
@@ -332,6 +332,33 @@ async def get_product_image(product_id: str, image_id: Optional[str] = None):
             data_url = f"{spire_client.base_url}inventory/items/{product_id}/images/{img_id}/data"
             
         content, content_type = await spire_client.get_image_data_from_url(data_url)
+
+        if no_bg:
+            try:
+                import io
+                import numpy as np
+                from PIL import Image
+
+                # Usar numpy para vectorizar el procesamiento, lo cual es miles de veces más rápido
+                # y evita bloquear el servidor cuando se cargan 20 imágenes al mismo tiempo
+                input_image = Image.open(io.BytesIO(content)).convert("RGBA")
+                data = np.array(input_image)
+                
+                # Identificar los píxeles que son blancos puros o casi puros
+                white_pixels = (data[:, :, 0] >= 250) & (data[:, :, 1] >= 250) & (data[:, :, 2] >= 250)
+                
+                # Cambiar la transparencia (canal Alpha = 3) a 0 para los píxeles blancos
+                data[white_pixels, 3] = 0
+                
+                output_image = Image.fromarray(data)
+                
+                img_byte_arr = io.BytesIO()
+                output_image.save(img_byte_arr, format='PNG')
+                content = img_byte_arr.getvalue()
+                content_type = "image/png"
+            except Exception as e:
+                print(f"Error removing pure white background: {e}")
+
         return Response(
             content=content, 
             media_type=content_type,
