@@ -1,12 +1,11 @@
 import sys
 import os
 
-# Asegúrate de que el directorio de tu backend esté en el PATH
+# Añade el directorio actual al path de Python
 sys.path.insert(0, os.path.dirname(__file__))
 
-# Importa el adaptador WSGI y tu aplicación FastAPI
 from a2wsgi import ASGIMiddleware
-from main import app  # Reemplaza 'main' por el nombre de tu archivo principal (ej. app.py -> de app importar app)
+from main import app  # Importa la instancia 'app' desde tu archivo main.py
 
-# Passenger buscará la variable 'application'
+# Phusion Passenger busca esta variable exacta: 'application'
 application = ASGIMiddleware(app)
