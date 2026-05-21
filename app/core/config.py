@@ -24,10 +24,10 @@ class Settings(BaseSettings):
     MAIL_SSL_TLS: bool = False
     SALES_EMAIL: str = ""
 
-    SSH_CPANEL_PASSWORD: str
-    CPANEL_HOST: str
-    CPANEL_USERNAME: str
-    CPANEL_TOKEN: str
+    SSH_CPANEL_PASSWORD: str | None = None
+    CPANEL_HOST: str | None = None
+    CPANEL_USERNAME: str | None = None
+    CPANEL_TOKEN: str | None = None
 
     FRONTEND_URLS: str
 
