@@ -1,6 +1,5 @@
 ---
 deployment:
   tasks:
-    # Reinicia la aplicación Python en cPanel (Phusion Passenger)
-    - mkdir -p tmp
-    - touch tmp/restart.txt
+    - /bin/mkdir -p /home/nhanceco/action/repository/Backend/tmp
+    - /bin/touch /home/nhanceco/action/repository/Backend/tmp/restart.txt
