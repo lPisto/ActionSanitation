@@ -1,5 +1,6 @@
 import sys
 import os
+import re
 
 # Añade el directorio actual al path de Python
 sys.path.insert(0, os.path.dirname(__file__))
@@ -12,9 +13,18 @@ def wsgi_app(environ, start_response):
     script_name = "/actionsanitation"
     path_info = environ.get('PATH_INFO', '')
     
+    # Si PATH_INFO está vacío, intentar obtenerlo de REQUEST_URI
+    if not path_info:
+        path_info = environ.get('REQUEST_URI', '').split('?')[0]
+
+    # Limpiar el nombre del script de la ruta si Apache no lo hizo
     if path_info.startswith(script_name):
-        environ['PATH_INFO'] = path_info[len(script_name):] or "/"
-        environ['SCRIPT_NAME'] = script_name
+        path_info = path_info[len(script_name):]
+        
+    # Evitar rutas vacías o con doble slash (ej: //api/health)
+    path_info = re.sub(r'^/+', '/', path_info)
+    environ['PATH_INFO'] = path_info if path_info else "/"
+    environ['SCRIPT_NAME'] = script_name
         
     return ASGIMiddleware(app)(environ, start_response)
 
