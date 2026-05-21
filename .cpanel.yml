@@ -4,3 +4,5 @@ deployment:
     # Esto le indica a cPanel que después de hacer 'git pull' debe actualizar las dependencias
     # Nota: Asegúrate de que la ruta virtualenv coincida con la que te da cPanel en "Setup Python App"
     - pip install -r Backend/requirements.txt
+    - export DEPLOYPATH=/home/nhanceco/action/repository/Backend
+    - /bin/rsync -av --delete --exclude='.git' --exclude='.cpanel.yml' ./ $DEPLOYPATH
