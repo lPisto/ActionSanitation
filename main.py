@@ -18,7 +18,8 @@ async def lifespan(app: FastAPI):
     # Shutdown
     await close_mongo_connection()
 
-app = FastAPI(title="Action Sanitation API", version="1.0.0", lifespan=lifespan)
+# app = FastAPI(title="Action Sanitation API", version="1.0.0", lifespan=lifespan)
+app = FastAPI(title="Action Sanitation API", version="1.0.0")
 
 app.mount("/static", StaticFiles(directory="static"), name="static")
 
