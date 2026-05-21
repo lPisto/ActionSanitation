@@ -2,7 +2,8 @@ import stripe
 import os
 from datetime import datetime
 from fastapi import APIRouter, Depends, HTTPException, Request
-from typing import List
+from typing import List, Optional
+from pydantic import BaseModel
 from app.services.spire_client import spire_client
 from app.api.deps import get_current_user
 from app.models.user import UserInDB
@@ -10,9 +11,100 @@ from app.models.order import OrderCreate, OrderResponse
 from app.core.config import settings
 from app.db.mongodb import get_database
 from app.services.email_service import send_order_confirmation_email
+import json
+import httpx
+import xml.etree.ElementTree as ET
 
 router = APIRouter()
 stripe.api_key = settings.STRIPE_API_KEY
+
+class ShippingItem(BaseModel):
+    product_id: str
+    quantity: int
+    weight_kg: float = 0.0
+    is_dangerous_good: bool = False
+
+class ShippingRequest(BaseModel):
+    postal_code: str
+    items: List[ShippingItem]
+
+def get_product_weight(product_id: str) -> float:
+    try:
+        with open("products.json", "r", encoding="utf-8") as f:
+            data = json.load(f)
+            for item in data.get("records", []):
+                if item.get("partNo") == product_id:
+                    weight_str = item.get("weight", "0")
+                    return float(weight_str)
+    except Exception as e:
+        print(f"Error reading weight for {product_id}: {e}")
+    return 0.0
+
+@router.post("/calculate-shipping")
+async def calculate_shipping(req: ShippingRequest):
+    total_weight = 0.0
+    for item in req.items:
+        w = get_product_weight(item.product_id)
+        # If weight is 0, we assume at least 0.5 kg for shipping purposes
+        weight_to_add = w if w > 0 else 0.5
+        total_weight += (weight_to_add * item.quantity)
+    
+    if total_weight == 0:
+        total_weight = 1.0
+
+    # Ensure max length for postal code and formatting (Canada Post expects without spaces)
+    dest_zip = req.postal_code.replace(" ", "").upper()
+
+    xml_request = f"""<?xml version="1.0" encoding="UTF-8"?>
+<mailing-scenario xmlns="http://www.canadapost.ca/ws/ship/rate-v4">
+  <customer-number>1234567</customer-number>
+  <parcel-characteristics>
+    <weight>{total_weight:.2f}</weight>
+  </parcel-characteristics>
+  <origin-postal-code>K2B8J6</origin-postal-code>
+  <destination>
+    <domestic>
+      <postal-code>{dest_zip}</postal-code>
+    </domestic>
+  </destination>
+</mailing-scenario>"""
+
+    # We will try to call the Canada Post API.
+    # Note: Without a valid API key, this will likely fail. We provide a fallback.
+    url = "https://ct.soa-gw.canadapost.ca/rs/ship/price"
+    
+    # We use a dummy API key for the development environment. In production, these should be env vars.
+    api_user = os.getenv("CANADA_POST_USER", "dummy")
+    api_pass = os.getenv("CANADA_POST_PASS", "dummy")
+    
+    try:
+        async with httpx.AsyncClient() as client:
+            resp = await client.post(
+                url,
+                content=xml_request,
+                headers={"Content-Type": "application/vnd.cpc.ship.rate-v4+xml", "Accept": "application/vnd.cpc.ship.rate-v4+xml"},
+                auth=(api_user, api_pass),
+                timeout=5.0
+            )
+            
+        if resp.status_code == 200:
+            root = ET.fromstring(resp.text)
+            # Find all prices and return the minimum or standard (DOM.RP)
+            namespaces = {'ns': 'http://www.canadapost.ca/ws/ship/rate-v4'}
+            quotes = root.findall('.//ns:price-quote', namespaces)
+            prices = []
+            for quote in quotes:
+                due = quote.find('.//ns:due', namespaces)
+                if due is not None:
+                    prices.append(float(due.text))
+            
+            if prices:
+                return {"shipping_cost": min(prices)}
+    except Exception as e:
+        print(f"Canada Post API Error: {e}")
+    
+    # Fallback flat rate if API fails or we don't have credentials
+    return {"shipping_cost": 15.0}
 
 @router.post("/", response_model=OrderResponse)
 async def create_order(order: OrderCreate, current_user: UserInDB = Depends(get_current_user)):
