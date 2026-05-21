@@ -51,11 +51,8 @@ def health_check():
 
 @app.get("/")
 def read_root():
-    # Opción 1: Devolver un mensaje simple (descomenta esta línea si prefieres esto)
-    # return {"message": "Welcome to Action Sanitation API"}
-    
-    # Opción 2: Redirigir a la documentación interactiva (recomendado)
-    return RedirectResponse(url="docs")
+    # Devolver JSON para evitar que Apache en cPanel tire 400 por redirección relativa
+    return {"message": "Welcome to Action Sanitation API", "status": "online", "docs_url": "/actionsanitation/docs"}
 
 if __name__ == "__main__":
     uvicorn.run("main:app", host="0.0.0.0", port=8000, reload=True)
