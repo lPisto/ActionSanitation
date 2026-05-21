@@ -19,14 +19,14 @@ async def lifespan(app: FastAPI):
     # Shutdown
     await close_mongo_connection()
 
-app = FastAPI(title="Action Sanitation API", version="1.0.0", lifespan=lifespan, root_path="/actionsanitation")
+app = FastAPI(title="Action Sanitation API", version="1.0.0", lifespan=lifespan)
 
 app.mount("/static", StaticFiles(directory="static"), name="static")
 
 app.add_middleware(
     CORSMiddleware,
-    allow_origins= "*",
-    allow_credentials=True,
+    allow_origins=["*"],
+    allow_credentials=False,
     allow_methods=["*"],
     allow_headers=["*"],
 )
@@ -55,7 +55,7 @@ def read_root():
     # return {"message": "Welcome to Action Sanitation API"}
     
     # Opción 2: Redirigir a la documentación interactiva (recomendado)
-    return RedirectResponse(url="/docs")
+    return RedirectResponse(url="docs")
 
 if __name__ == "__main__":
     uvicorn.run("main:app", host="0.0.0.0", port=8000, reload=True)
