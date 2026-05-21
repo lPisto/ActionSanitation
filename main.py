@@ -22,16 +22,9 @@ app = FastAPI(title="Action Sanitation API", version="1.0.0", lifespan=lifespan)
 
 app.mount("/static", StaticFiles(directory="static"), name="static")
 
-frontend_urls = os.getenv("FRONTEND_URLS", "https://action-sanitation-webpage.vercel.app")
-allowed_origins = [url.strip().rstrip("/") for url in frontend_urls.split(",")]
-
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=[
-        "https://action-sanitation-webpage.vercel.app",
-        "http://localhost:5173",
-        "http://localhost:3000",
-    ],
+    allow_origins=settings.FRONTEND_URLS,
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],

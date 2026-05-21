@@ -29,7 +29,7 @@ class Settings(BaseSettings):
     CPANEL_USERNAME: str
     CPANEL_TOKEN: str
 
-    FRONTEND_URLS: list[str] = []
+    FRONTEND_URLS: list[str] = ["https://action-sanitation-webpage.vercel.app"]
 
     class Config:
         env_file = ".env"
