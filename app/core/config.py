@@ -24,6 +24,11 @@ class Settings(BaseSettings):
     MAIL_SSL_TLS: bool = False
     SALES_EMAIL: str = ""
 
+    SSH_CPANEL_PASSWORD: str
+    CPANEL_HOST: str
+    CPANEL_USERNAME: str
+    CPANEL_TOKEN: str
+
     class Config:
         env_file = ".env"
 
