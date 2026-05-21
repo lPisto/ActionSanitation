@@ -19,6 +19,8 @@ jobs:
           port: 22
           script: |
             cd /home/nhanceco/action/repository/Backend
+            git reset --hard HEAD
+            git clean -fd
             git pull origin main
             mkdir -p tmp
             touch tmp/restart.txt
