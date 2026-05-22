@@ -45,7 +45,7 @@ app.include_router(contact.router, prefix="/api/contact", tags=["Contact"])
 app.include_router(stripe_pay.router, prefix="/api/stripe", tags=["Stripe"])
 app.include_router(newsletter.router, prefix="/api/newsletter", tags=["newsletter"])
 
-@app.get("/api/health")
+@app.get("actionsanitation/api/health")
 def health_check():
     return {"status": "ok", "environment": "production"}
 
