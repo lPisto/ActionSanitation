@@ -32,9 +32,17 @@ app.add_middleware(
 )
 
 
-@app.options("/{full_path:path}")
-async def preflight_handler(full_path: str):
-    return Response(status_code=204)
+from fastapi import Request
+
+@app.get("/{full_path:path}")
+async def catch_all(full_path: str, request: Request):
+    return {
+        "message": "FastAPI catch all",
+        "full_path": full_path,
+        "url_path": request.url.path,
+        "scope_path": request.scope.get("path"),
+        "root_path": request.scope.get("root_path"),
+    }
 
 app.include_router(auth.router, prefix="/api/auth", tags=["Authentication"])
 app.include_router(users.router, prefix="/api/users", tags=["Users"])
@@ -45,7 +53,7 @@ app.include_router(contact.router, prefix="/api/contact", tags=["Contact"])
 app.include_router(stripe_pay.router, prefix="/api/stripe", tags=["Stripe"])
 app.include_router(newsletter.router, prefix="/api/newsletter", tags=["newsletter"])
 
-@app.get("actionsanitation/api/health")
+@app.get("/api/health")
 def health_check():
     return {"status": "ok", "environment": "production"}
 
