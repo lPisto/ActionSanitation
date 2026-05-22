@@ -8,10 +8,14 @@ sys.path.insert(0, os.path.dirname(__file__))
 from a2wsgi import ASGIMiddleware
 from main import app  # Importa la instancia 'app' desde tu archivo main.py
 
-asgi_app = ASGIMiddleware(app)
+_wsgi_app = None
 
 # Envolver la aplicación para gestionar la subcarpeta correctamente en cPanel
-def wsgi_app(environ, start_response):
+def application(environ, start_response):
+    global _wsgi_app
+    if _wsgi_app is None:
+        _wsgi_app = ASGIMiddleware(app)
+
     script_name = "/actionsanitation"
     path_info = environ.get('PATH_INFO', '')
     
@@ -28,6 +32,4 @@ def wsgi_app(environ, start_response):
     environ['PATH_INFO'] = path_info if path_info else "/"
     environ['SCRIPT_NAME'] = script_name
         
-    return asgi_app(environ, start_response)
-
-application = wsgi_app
+    return _wsgi_app(environ, start_response)
