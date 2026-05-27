@@ -1,18 +1,30 @@
 import os
 import uuid
 import shutil
+import cloudinary
+import cloudinary.uploader
 from fastapi import APIRouter, File, UploadFile, Form, HTTPException, Query, Request
 from typing import List, Optional
 from app.db.mongodb import get_database
+from dotenv import load_dotenv
+
+load_dotenv()
+
+# Configure Cloudinary explicitly
+cloudinary_url = os.getenv("CLOUDINARY_URL")
+if cloudinary_url:
+    url_clean = cloudinary_url.replace("cloudinary://", "")
+    api_key_secret, cloud_name = url_clean.split("@")
+    api_key, api_secret = api_key_secret.split(":")
+    cloudinary.config(
+        cloud_name=cloud_name,
+        api_key=api_key,
+        api_secret=api_secret
+    )
 
 router = APIRouter()
 
-# Initial structure if file does not exist (not needed to initialize on disk anymore)
 CATEGORIES = ["catalogs", "flyers", "sds", "gallery", "training"]
-
-# Create static directories if they don't exist
-for category in CATEGORIES:
-    os.makedirs(f"static/{category}", exist_ok=True)
 
 @router.get("")
 async def get_all_resources(request: Request, type: Optional[str] = None):
@@ -39,25 +51,6 @@ async def get_all_resources(request: Request, type: Optional[str] = None):
         if item.get("url") and item["url"].startswith("/"):
             item["url"] = f"{base_url}{item['url']}"
 
-    # Append local files that are not in the DB for specific categories
-    if category in ["sds", "catalogs", "flyers"]:
-        local_files = []
-        for root, _, files in os.walk(f"static/{category}"):
-            for file in files:
-                if file.lower().endswith(".pdf"):
-                    # create relative url
-                    rel_url = "/" + os.path.join(root, file).replace("\\", "/")
-                    title = os.path.splitext(file)[0].replace("_", " ")
-                    # check if already in items
-                    if not any(i.get("url") == f"{base_url}{rel_url}" or i.get("url") == rel_url for i in items):
-                        local_files.append({
-                            "id": uuid.uuid4().hex[:8],
-                            "category": category,
-                            "title": title,
-                            "url": f"{base_url}{rel_url}",
-                        })
-        items.extend(local_files)
-        
     return items
 
 # --- GET ENDPOINTS ---
@@ -106,50 +99,30 @@ async def get_training_materials():
 
 @router.get("/vendor-msds")
 async def get_vendor_msds(request: Request, folder: str = Query("")):
-    # Definimos la ruta base de la carpeta dentro de tu directorio "static"
-    base_dir = os.path.abspath(os.path.join(os.getcwd(), "static", "MSDS of Vendors Library"))
+    db = get_database()
+    # Normalize folder path to prevent slashes issues
+    folder_path = folder.replace("\\", "/").strip("/")
     
-    # Si la carpeta aún no existe, devolvemos una lista vacía
-    if not os.path.exists(base_dir):
-        return []
-        
-    target_dir = os.path.abspath(os.path.join(base_dir, folder))
+    # Query MongoDB for items in this specific folder
+    items = await db["vendor_msds"].find({"parent_folder": folder_path}).to_list(length=None)
     
-    # Seguridad: Prevenir ataques de Directory Traversal (ej. folder="../../../")
-    if not target_dir.startswith(base_dir):
-        raise HTTPException(status_code=400, detail="Ruta de carpeta inválida")
-        
-    if not os.path.exists(target_dir) or not os.path.isdir(target_dir):
-        raise HTTPException(status_code=404, detail="Carpeta no encontrada")
-        
-    items = []
+    result = []
     base_url = str(request.base_url).rstrip('/')
-    try:
-        for item in os.listdir(target_dir):
-            item_path = os.path.join(target_dir, item)
+    
+    for item in items:
+        url = item.get("url")
+        if url and url.startswith("/"):
+            url = f"{base_url}{url}"
             
-            # Si es una carpeta, la agregamos como tipo 'folder'
-            if os.path.isdir(item_path):
-                items.append({
-                    "name": item,
-                    "type": "folder"
-                })
-            else:
-                # Si es un archivo, verificamos que sea un documento válido
-                if item.lower().endswith(('.pdf', '.doc', '.docx', '.xls', '.xlsx')):
-                    rel_path = f"/static/MSDS of Vendors Library/{folder}/{item}" if folder else f"/static/MSDS of Vendors Library/{item}"
-                    rel_path = rel_path.replace("\\", "/").replace("//", "/")
-                    items.append({
-                        "name": item,
-                        "type": "file",
-                        "url": f"{base_url}{rel_path}"
-                    })
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
+        result.append({
+            "name": item["name"],
+            "type": item["type"],
+            "url": url
+        })
             
-    # Ordenar: primero las carpetas, luego los archivos (alfabéticamente)
-    items.sort(key=lambda x: (x["type"] == "file", x["name"].lower()))
-    return items
+    # Sort: folders first, then files
+    result.sort(key=lambda x: (x["type"] == "file", x["name"].lower()))
+    return result
 
 # --- UPLOAD (POST) ENDPOINTS ---
 
@@ -162,23 +135,20 @@ async def upload_resource(
     if category not in CATEGORIES:
         raise HTTPException(status_code=400, detail="Invalid category. Must be: catalogs, flyers, sds, gallery, training")
 
-    # Ensure secure filename and generate unique ID
-    extension = os.path.splitext(file.filename)[1]
-    unique_id = uuid.uuid4().hex[:8]
-    safe_filename = f"{unique_id}_{file.filename.replace(' ', '_')}"
-    file_path = f"static/{category}/{safe_filename}"
-    
-    # URL to be accessed by frontend
-    url_path = f"/static/{category}/{safe_filename}"
-
-    # Save physical file
+    # Upload file to Cloudinary
     try:
-        with open(file_path, "wb") as buffer:
-            shutil.copyfileobj(file.file, buffer)
+        result = cloudinary.uploader.upload(
+            file.file,
+            folder=f"action_sanitation/{category}",
+            resource_type="auto"
+        )
+        url_path = result.get("secure_url")
+        public_id = result.get("public_id")
+        resource_type = result.get("resource_type", "image")
     except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Could not save file: {str(e)}")
+        raise HTTPException(status_code=500, detail=f"Could not upload file to Cloudinary: {str(e)}")
 
-    # Display name (use provided title or filename without extension)
+    unique_id = uuid.uuid4().hex[:8]
     display_name = title if title else os.path.splitext(file.filename)[0]
 
     # Build DB entry
@@ -187,6 +157,8 @@ async def upload_resource(
         "id": unique_id,
         "category": category,
         "name": display_name,
+        "cloudinary_public_id": public_id,
+        "cloudinary_resource_type": resource_type
     }
     
     # Adjust field names based on category to maintain backward compatibility
@@ -219,14 +191,15 @@ async def delete_resource(category: str, item_id: str):
     if not item_to_delete:
         raise HTTPException(status_code=404, detail="Item not found")
 
-    # Determine file path from URL
-    url_field = "url" if category in ["catalogs", "flyers", "sds"] else ("image_url" if category == "gallery" else "video_url")
-    file_url = item_to_delete.get(url_field, "")
-    
-    if file_url.startswith("/"):
-        file_path = file_url.lstrip("/") # Remove leading slash to get relative local path
-        if os.path.exists(file_path):
-            os.remove(file_path)
+    # If it is a Cloudinary file
+    public_id = item_to_delete.get("cloudinary_public_id")
+    if public_id:
+        resource_type = item_to_delete.get("cloudinary_resource_type", "image")
+        try:
+            cloudinary.uploader.destroy(public_id, resource_type=resource_type)
+        except Exception as e:
+            # We can log this, but we'll proceed to delete from DB anyway
+            pass
 
     # Remove from DB
     await db["resources"].delete_one({"category": category, "id": item_id})

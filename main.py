@@ -1,15 +1,12 @@
 import uvicorn
 from fastapi import FastAPI, Response
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.staticfiles import StaticFiles
 from contextlib import asynccontextmanager
 import os
 from app.api.endpoints import auth, products, users, orders, resources, contact, stripe_pay, newsletter
 from app.core.config import settings
 from app.db.mongodb import connect_to_mongo, close_mongo_connection
 from fastapi.responses import RedirectResponse
-
-os.makedirs("static", exist_ok=True)
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
@@ -20,8 +17,6 @@ async def lifespan(app: FastAPI):
     await close_mongo_connection()
 
 app = FastAPI(title="Action Sanitation API", version="1.0.0", lifespan=lifespan)
-
-app.mount("/static", StaticFiles(directory="static"), name="static")
 
 app.add_middleware(
     CORSMiddleware,

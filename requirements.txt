@@ -10,3 +10,4 @@ python-jose[cryptography]
 fastapi-mail
 motor
 a2wsgi
+cloudinary

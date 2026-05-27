@@ -1,4 +1,7 @@
 from pydantic_settings import BaseSettings
+from dotenv import load_dotenv
+
+load_dotenv()
 
 class Settings(BaseSettings):
     MONGODB_URL: str
@@ -18,7 +21,10 @@ class Settings(BaseSettings):
     MAIL_USERNAME: str = ""
     MAIL_PASSWORD: str = ""
     MAIL_FROM: str = ""
-    MAIL_PORT: int = 587
+    MS_CLIENT_ID: str
+    MS_OBJECT_ID: str
+    MS_TENANT_ID: str
+    MS_CLIENT_SECRET: str
     MAIL_SERVER: str = ""
     MAIL_STARTTLS: bool = True
     MAIL_SSL_TLS: bool = False
@@ -30,6 +36,9 @@ class Settings(BaseSettings):
     CPANEL_TOKEN: str | None = None
 
     FRONTEND_URLS: str
+
+    CLOUDINARY_URL: str
+  
 
     class Config:
         env_file = ".env"
