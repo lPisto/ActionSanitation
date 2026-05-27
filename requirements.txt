@@ -11,3 +11,4 @@ fastapi-mail
 motor
 a2wsgi
 cloudinary
+python-multipart
