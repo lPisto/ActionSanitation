@@ -1,24 +1,64 @@
-from fastapi_mail import FastMail, MessageSchema, ConnectionConfig
+import httpx
 from app.core.config import settings
 
-conf = ConnectionConfig(
-    MAIL_USERNAME=settings.MAIL_USERNAME,
-    MAIL_PASSWORD=settings.MAIL_PASSWORD,
-    MAIL_FROM=settings.MAIL_FROM,
-    MAIL_PORT=settings.MAIL_PORT,
-    MAIL_SERVER=settings.MAIL_SERVER,
-    MAIL_STARTTLS=settings.MAIL_STARTTLS,
-    MAIL_SSL_TLS=settings.MAIL_SSL_TLS,
-    USE_CREDENTIALS=True,
-    VALIDATE_CERTS=True
-)
+async def get_graph_token():
+    url = f"https://login.microsoftonline.com/{settings.MS_TENANT_ID}/oauth2/v2.0/token"
+    data = {
+        "client_id": getattr(settings, "MS_CLIENT_ID", ""),
+        "scope": "https://graph.microsoft.com/.default",
+        "client_secret": getattr(settings, "MS_CLIENT_SECRET", ""),
+        "grant_type": "client_credentials"
+    }
+    async with httpx.AsyncClient() as client:
+        response = await client.post(url, data=data)
+        response.raise_for_status()
+        return response.json().get("access_token")
+
+async def send_email_via_graph(subject: str, recipients: list, html_content: str):
+    if not getattr(settings, "MS_CLIENT_ID", None):
+        print("Microsoft Graph not configured, skipping email send.")
+        print(f"To: {recipients}, Subject: {subject}")
+        return
+
+    try:
+        token = await get_graph_token()
+    except Exception as e:
+        print(f"Error obtaining Graph token: {e}")
+        return
+
+    # Endpoint to send email from the specific mailbox defined in MAIL_FROM
+    send_mail_url = f"https://graph.microsoft.com/v1.0/users/{settings.MAIL_FROM}/sendMail"
+    
+    headers = {
+        "Authorization": f"Bearer {token}",
+        "Content-Type": "application/json"
+    }
+    
+    to_recipients = [{"emailAddress": {"address": email}} for email in recipients]
+    
+    email_msg = {
+        "message": {
+            "subject": subject,
+            "body": {
+                "contentType": "HTML",
+                "content": html_content
+            },
+            "toRecipients": to_recipients
+        },
+        "saveToSentItems": "true"
+    }
+    
+    async with httpx.AsyncClient() as client:
+        try:
+            response = await client.post(send_mail_url, headers=headers, json=email_msg)
+            response.raise_for_status()
+            print("Email sent successfully via MS Graph.")
+        except httpx.HTTPStatusError as e:
+            print(f"Failed to send email via MS Graph: {e.response.text}")
+        except Exception as e:
+            print(f"Error sending email via MS Graph: {e}")
 
 async def send_contact_email(name: str, email: str, subject: str, message: str):
-    if not settings.MAIL_USERNAME:
-        print("Email not configured, skipping send.")
-        print(f"To: {settings.SALES_EMAIL}, Subject: {subject}, Body: {message}")
-        return
-        
     html = f"""
     <b> New contact form submission from: </b><p> {name} ({email})</p>
     <p><strong>Subject:</strong> {subject}</p>
@@ -26,21 +66,13 @@ async def send_contact_email(name: str, email: str, subject: str, message: str):
     <p>{message}</p>
     """
 
-    message_schema = MessageSchema(
-        subject=f"New Contact Form: {subject}",
+    await send_email_via_graph(
+        subject=f"New Contact Form: {subject}", 
         recipients=[settings.SALES_EMAIL],
-        body=html,
-        subtype="html"
+        html_content=html
     )
 
-    fm = FastMail(conf)
-    await fm.send_message(message_schema)
-
 async def send_order_confirmation_email(to_email: str, name: str, order_id: str, items: list, total_amount: float, shipping_address: str):
-    if not settings.MAIL_USERNAME:
-        print("Email not configured, skipping order confirmation send.")
-        return
-        
     items_html = "".join([
         f"<li><strong>{item.get('name', 'Item')}</strong> (SKU: {item.get('sku', '')})<br>"
         f"Qty: {item.get('quantity', 1)} | Price: ${float(item.get('price', 0)):.2f}</li>"
@@ -65,21 +97,13 @@ async def send_order_confirmation_email(to_email: str, name: str, order_id: str,
     </div>
     """
 
-    message_schema = MessageSchema(
-        subject=f"Order Confirmation #{order_id} - Action Sanitation",
-        recipients=[to_email],
-        body=html,
-        subtype="html"
+    await send_email_via_graph(
+        subject=f"Order Confirmation #{order_id} - Action Sanitation", 
+        recipients=[to_email], 
+        html_content=html
     )
 
-    fm = FastMail(conf)
-    await fm.send_message(message_schema)
-
 async def send_newsletter_notification_email(subscriber_email: str):
-    if not settings.MAIL_USERNAME:
-        print("Email not configured, skipping newsletter notification send.")
-        return
-        
     html = f"""
     <div style="font-family: Arial, sans-serif; color: #333;">
         <h2 style="color: #2563eb;">New Newsletter Subscriber!</h2>
@@ -88,22 +112,13 @@ async def send_newsletter_notification_email(subscriber_email: str):
     </div>
     """
 
-    message_schema = MessageSchema(
-        subject="New Newsletter Subscription",
-        recipients=[settings.SALES_EMAIL],
-        body=html,
-        subtype="html"
+    await send_email_via_graph(
+        subject="New Newsletter Subscription", 
+        recipients=[settings.SALES_EMAIL], 
+        html_content=html
     )
-    
-    fm = FastMail(conf)
-    await fm.send_message(message_schema)
 
 async def send_password_reset_email(to_email: str, otp: str):
-    if not settings.MAIL_USERNAME:
-        print("Email not configured, skipping password reset send.")
-        print(f"To: {to_email}, OTP: {otp}")
-        return
-        
     html = f"""
     <div style="font-family: Arial, sans-serif; max-width: 600px; margin: auto; color: #333;">
         <h2 style="color: #2563eb;">Password Reset Request</h2>
@@ -118,12 +133,8 @@ async def send_password_reset_email(to_email: str, otp: str):
     </div>
     """
 
-    message_schema = MessageSchema(
-        subject="Password Reset Code - Action Sanitation",
-        recipients=[to_email],
-        body=html,
-        subtype="html"
+    await send_email_via_graph(
+        subject="Password Reset Code - Action Sanitation", 
+        recipients=[to_email], 
+        html_content=html
     )
-
-    fm = FastMail(conf)
-    await fm.send_message(message_schema)
