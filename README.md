@@ -2,7 +2,9 @@
 
 Este documento detalla todos los endpoints disponibles en el backend de Action Sanitation (FastAPI). Sirve como guía y base fundamental para el desarrollo del Frontend.
 
-La URL base para todos los endpoints (salvo que se indique lo contrario en tu entorno) es: `http://localhost:8000`
+**URL Base Backend (Producción):** `https://action-sanitation-backend.vercel.app`
+**URL Base Frontend (Producción):** `https://action-sanitation-webpage.vercel.app`
+**URL Base (Local):** `http://localhost:8000`
 
 ---
 

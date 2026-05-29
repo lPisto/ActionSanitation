@@ -61,7 +61,7 @@ def is_product_active(product_data: dict) -> bool:
         
     return True
 
-def normalize_product_data(record: dict, request: Request = None, customer_pricing: dict = None) -> dict:
+def normalize_product_data(record: dict, request: Request = None, customer_pricing: dict = None, is_authenticated: bool = True) -> dict:
     inv = record.get("inventory", {})
     
     # Unificamos ambas listas de imágenes para nunca perder las del inventario base
@@ -113,6 +113,12 @@ def normalize_product_data(record: dict, request: Request = None, customer_prici
     if isinstance(sales_dept, dict):
         code = sales_dept.get("code")
         record["salesDept"] = int(code) if code and code.isdigit() else sales_dept.get("id", 0)
+
+    # Extract extended description
+    ext_desc = record.get("extendedDescription") or inv.get("extendedDescription")
+    if ext_desc:
+        record["extendedDescription"] = ext_desc
+        record["description"] = ext_desc
     
     # Normalizar UoM
     measure_code = record.get("sellMeasureCode") or inv.get("sellMeasureCode") or "EACH"
@@ -131,12 +137,18 @@ def normalize_product_data(record: dict, request: Request = None, customer_prici
             sell_prices = [float(p) if p else 0.0 for p in pricing["sellPrice"]]
             record["pricing"] = {measure_code: {"sellPrices": sell_prices}}
         else:
+            normalized_pricing = {}
             for m_code, m_data in pricing.items():
                 if isinstance(m_data, dict) and "sellPrices" in m_data:
                     float_prices = [float(p) if p else 0.0 for p in m_data["sellPrices"]]
-                    m_data["sellPrices"] = float_prices
+                    normalized_pricing[m_code] = {"sellPrices": float_prices}
                     if m_code == measure_code:
                         sell_prices = float_prices
+            record["pricing"] = normalized_pricing
+
+    if "price" not in record or record["price"] is None:
+        if sell_prices and len(sell_prices) > 0:
+            record["price"] = sell_prices[0]
 
     for field in ["price", "currentCost", "averageCost", "standardCost", "list_price", "sale_price"]:
         if field in record and record[field] is not None:
@@ -144,6 +156,15 @@ def normalize_product_data(record: dict, request: Request = None, customer_prici
                 record[field] = float(record[field])
             except (ValueError, TypeError):
                 pass
+
+    if not is_authenticated:
+        if "pricing" in record:
+            for m_code, m_data in record["pricing"].items():
+                if isinstance(m_data, dict) and "sellPrices" in m_data:
+                    m_data["sellPrices"] = [round(p * 1.05, 2) for p in m_data["sellPrices"]]
+        for field in ["price", "list_price", "sale_price"]:
+            if field in record and isinstance(record[field], (int, float)):
+                record[field] = round(record[field] * 1.05, 2)
 
     # Apply special customer pricing if provided
     if customer_pricing and actual_part_no and actual_part_no in customer_pricing:
@@ -187,7 +208,7 @@ async def get_products(
         deals = [d for d in deals if is_product_active(d)]
         
         for d in deals:
-            normalize_product_data(d, request, customer_pricing)
+            normalize_product_data(d, request, customer_pricing, is_authenticated=bool(current_user))
             
         # Pagination for deals
         return {
@@ -236,7 +257,7 @@ async def get_products(
             cats = SKU_MAPPING.get(actual_part_no, [])
             record["frontend_categories"] = cats
             
-            normalize_product_data(record, request, customer_pricing)
+            normalize_product_data(record, request, customer_pricing, is_authenticated=bool(current_user))
             
             # Lógica de filtrado en memoria
             # Si el cliente está filtrando usando códigos directos de Spire (final_dept/final_group) o búsqueda de texto (q_param), 
@@ -297,7 +318,7 @@ async def get_product(product_id: str, request: Request, current_user: Optional[
     actual_part_no = product.get("partNo") or product.get("inventory", {}).get("partNo") or product_id
     product["frontend_categories"] = SKU_MAPPING.get(actual_part_no, [])
 
-    return normalize_product_data(product, request, customer_pricing)
+    return normalize_product_data(product, request, customer_pricing, is_authenticated=bool(current_user))
 
 @router.get("/{product_id}/image")
 @router.get("/{product_id}/image/{image_id}")
@@ -333,31 +354,31 @@ async def get_product_image(product_id: str, image_id: Optional[str] = None, no_
             
         content, content_type = await spire_client.get_image_data_from_url(data_url)
 
-        if no_bg:
-            try:
-                import io
-                import numpy as np
-                from PIL import Image
+        # if no_bg:
+        #     try:
+        #         import io
+        #         import numpy as np
+        #         from PIL import Image
 
-                # Usar numpy para vectorizar el procesamiento, lo cual es miles de veces más rápido
-                # y evita bloquear el servidor cuando se cargan 20 imágenes al mismo tiempo
-                input_image = Image.open(io.BytesIO(content)).convert("RGBA")
-                data = np.array(input_image)
+        #         # Usar numpy para vectorizar el procesamiento, lo cual es miles de veces más rápido
+        #         # y evita bloquear el servidor cuando se cargan 20 imágenes al mismo tiempo
+        #         input_image = Image.open(io.BytesIO(content)).convert("RGBA")
+        #         data = np.array(input_image)
                 
-                # Identificar los píxeles que son blancos puros o casi puros
-                white_pixels = (data[:, :, 0] >= 250) & (data[:, :, 1] >= 250) & (data[:, :, 2] >= 250)
+        #         # Identificar únicamente los píxeles que son 100% blanco puro (255, 255, 255)
+        #         white_pixels = (data[:, :, 0] == 255) & (data[:, :, 1] == 255) & (data[:, :, 2] == 255)
                 
-                # Cambiar la transparencia (canal Alpha = 3) a 0 para los píxeles blancos
-                data[white_pixels, 3] = 0
+        #         # Cambiar la transparencia (canal Alpha = 3) a 0 para los píxeles blancos
+        #         data[white_pixels, 3] = 0
                 
-                output_image = Image.fromarray(data)
+        #         output_image = Image.fromarray(data)
                 
-                img_byte_arr = io.BytesIO()
-                output_image.save(img_byte_arr, format='PNG')
-                content = img_byte_arr.getvalue()
-                content_type = "image/png"
-            except Exception as e:
-                print(f"Error removing pure white background: {e}")
+        #         img_byte_arr = io.BytesIO()
+        #         output_image.save(img_byte_arr, format='PNG')
+        #         content = img_byte_arr.getvalue()
+        #         content_type = "image/png"
+        #     except Exception as e:
+        #         print(f"Error removing pure white background: {e}")
 
         return Response(
             content=content, 
@@ -404,5 +425,5 @@ async def get_deals(request: Request):
     deals = await spire_client.get_deals()
     deals = [d for d in deals if is_product_active(d)]
     for d in deals:
-        normalize_product_data(d, request)
+        normalize_product_data(d, request, is_authenticated=False)
     return deals

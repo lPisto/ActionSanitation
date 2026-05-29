@@ -43,6 +43,10 @@ async def get_all_resources(request: Request, type: Optional[str] = None):
         # Normalize title
         if "name" in item and "title" not in item:
             item["title"] = item["name"]
+        if category == "catalogs":
+            if "name" in item: item["name"] = item["name"].replace("2017", "").strip()
+            if "title" in item: item["title"] = item["title"].replace("2017", "").strip()
+
         if "image_url" in item and "url" not in item:
             item["url"] = item["image_url"]
         if "video_url" in item and "url" not in item:
@@ -61,6 +65,8 @@ async def get_catalogs():
     items = await db["resources"].find({"category": "catalogs"}).to_list(length=None)
     for item in items:
         item["_id"] = str(item["_id"])
+        if "name" in item: item["name"] = item["name"].replace("2017", "").strip()
+        if "title" in item: item["title"] = item["title"].replace("2017", "").strip()
     return items
 
 @router.get("/downloads/flyers")
