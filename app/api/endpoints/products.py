@@ -3,18 +3,9 @@ import base64
 import os
 import json
 from app.services.spire_client import spire_client
-from app.api.deps import get_current_user, get_optional_current_user
+from app.api.deps import get_current_user, get_optional_current_user, get_database
 from app.models.user import UserInDB
 from typing import Optional
-
-SKU_MAPPING = {}
-try:
-    mapping_path = os.path.join(os.path.dirname(__file__), "../../../sku_mapping.json")
-    if os.path.exists(mapping_path):
-        with open(mapping_path, "r", encoding="utf-8") as f:
-            SKU_MAPPING = json.load(f)
-except Exception as e:
-    print(f"Error loading SKU mapping: {e}")
 
 router = APIRouter()
 
@@ -61,7 +52,7 @@ def is_product_active(product_data: dict) -> bool:
         
     return True
 
-def normalize_product_data(record: dict, request: Request = None, customer_pricing: dict = None, is_authenticated: bool = True) -> dict:
+def normalize_product_data(record: dict, request: Request = None, customer_pricing: dict = None, is_authenticated: bool = True, metadata: dict = None) -> dict:
     inv = record.get("inventory", {})
     
     # Unificamos ambas listas de imágenes para nunca perder las del inventario base
@@ -114,11 +105,24 @@ def normalize_product_data(record: dict, request: Request = None, customer_prici
         code = sales_dept.get("code")
         record["salesDept"] = int(code) if code and code.isdigit() else sales_dept.get("id", 0)
 
-    # Extract extended description
-    ext_desc = record.get("extendedDescription") or inv.get("extendedDescription")
-    if ext_desc:
-        record["extendedDescription"] = ext_desc
-        record["description"] = ext_desc
+    # --- Gestión de Descripciones ---
+    # En Spire, 'description' es el Nombre/Título del producto.
+    product_name = (record.get("description") or inv.get("description", "")).strip()
+    
+    record["title"] = product_name
+    # Mantenemos 'name' y 'description' como el título original para el frontend.
+    record["name"] = product_name
+    record["description"] = product_name
+    record["short_description"] = product_name
+
+    mongo_long = (metadata.get("description") or "").strip() if metadata else ""
+    spire_ext = (record.get("extendedDescription") or inv.get("extendedDescription") or "").strip()
+    
+    # La descripción larga tiene prioridad: 1. Mongo, 2. Extended Spire.
+    # Si es igual al nombre del producto, la dejamos vacía para evitar duplicidad visual.
+    long_desc = mongo_long or spire_ext
+    record["long_description"] = long_desc if long_desc != product_name else ""
+    record["frontend_categories"] = metadata.get("subcategories", []) if metadata else []
     
     # Normalizar UoM
     measure_code = record.get("sellMeasureCode") or inv.get("sellMeasureCode") or "EACH"
@@ -198,6 +202,7 @@ async def get_products(
 ):
     actual_start = skip if skip is not None else start
     
+    db = get_database()
     customer_pricing = {}
     if current_user and current_user.spire_customer_no:
         customer_pricing = await spire_client.get_customer_all_pricing(current_user.spire_customer_no)
@@ -247,17 +252,24 @@ async def get_products(
         # Filter out records with '*' or 'discontinued' in the description
         res["records"] = [r for r in res["records"] if is_product_active(r)]
         
-        # Mapeo y filtrado en base al archivo JSON para el frontend
+        # Extraer SKUs para buscar metadatos en una sola consulta
+        skus = []
+        for r in res["records"]:
+            sku = r.get("partNo") or r.get("inventory", {}).get("partNo") or r.get("id")
+            if sku: skus.append(sku)
+            
+        # Obtener metadatos desde MongoDB
+        metadata_list = await db["products_metadata"].find({"sku": {"$in": skus}}).to_list(length=None)
+        metadata_map = {m["sku"]: m for m in metadata_list}
+        
         filtered_records = []
         
         for record in res["records"]:
             actual_part_no = record.get("partNo") or record.get("inventory", {}).get("partNo") or record.get("id")
+            meta = metadata_map.get(actual_part_no)
+            cats = meta.get("subcategories", []) if meta else []
             
-            # Asignar categorías desde el JSON
-            cats = SKU_MAPPING.get(actual_part_no, [])
-            record["frontend_categories"] = cats
-            
-            normalize_product_data(record, request, customer_pricing, is_authenticated=bool(current_user))
+            normalize_product_data(record, request, customer_pricing, is_authenticated=bool(current_user), metadata=meta)
             
             # Lógica de filtrado en memoria
             # Si el cliente está filtrando usando códigos directos de Spire (final_dept/final_group) o búsqueda de texto (q_param), 
@@ -298,6 +310,7 @@ async def get_departments():
 @router.get("/{product_id}")
 async def get_product(product_id: str, request: Request, current_user: Optional[UserInDB] = Depends(get_optional_current_user)):
     product = await spire_client.get_product(product_id)
+    db = get_database()
     
     customer_pricing = {}
     if current_user and current_user.spire_customer_no:
@@ -316,9 +329,10 @@ async def get_product(product_id: str, request: Request, current_user: Optional[
             pass
 
     actual_part_no = product.get("partNo") or product.get("inventory", {}).get("partNo") or product_id
-    product["frontend_categories"] = SKU_MAPPING.get(actual_part_no, [])
+    # Buscar metadata individual
+    metadata = await db["products_metadata"].find_one({"sku": actual_part_no})
 
-    return normalize_product_data(product, request, customer_pricing, is_authenticated=bool(current_user))
+    return normalize_product_data(product, request, customer_pricing, is_authenticated=bool(current_user), metadata=metadata)
 
 @router.get("/{product_id}/image")
 @router.get("/{product_id}/image/{image_id}")
