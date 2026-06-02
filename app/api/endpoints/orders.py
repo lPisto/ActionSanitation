@@ -27,6 +27,7 @@ class ShippingItem(BaseModel):
 class ShippingRequest(BaseModel):
     postal_code: str
     items: List[ShippingItem]
+    subtotal: float
 
 def get_product_weight(product_id: str) -> float:
     try:
@@ -42,6 +43,10 @@ def get_product_weight(product_id: str) -> float:
 
 @router.post("/calculate-shipping")
 async def calculate_shipping(req: ShippingRequest):
+    # Regla de negocio estricta: < 250 -> $20 fijo, >= 250 -> $0 (Gratis)
+    # Esto tiene prioridad sobre cualquier cotización de transportista externa.
+    return {"shipping_cost": 0.0 if req.subtotal >= 250 else 20.0}
+
     total_weight = 0.0
     for item in req.items:
         w = get_product_weight(item.product_id)
@@ -103,8 +108,8 @@ async def calculate_shipping(req: ShippingRequest):
     except Exception as e:
         print(f"Canada Post API Error: {e}")
     
-    # Fallback flat rate if API fails or we don't have credentials
-    return {"shipping_cost": 15.0}
+    # Aplicar regla de negocio: < 250 -> 20, >= 250 -> Gratis
+    return {"shipping_cost": 0.0 if req.subtotal >= 250 else 20.0}
 
 @router.post("/", response_model=OrderResponse)
 async def create_order(order: OrderCreate, current_user: UserInDB = Depends(get_current_user)):
