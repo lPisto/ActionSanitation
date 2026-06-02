@@ -123,6 +123,7 @@ def normalize_product_data(record: dict, request: Request = None, customer_prici
     long_desc = mongo_long or spire_ext
     record["long_description"] = long_desc if long_desc != product_name else ""
     record["frontend_categories"] = metadata.get("subcategories", []) if metadata else []
+    record["sds_url"] = metadata.get("sds_url") if metadata else None
     
     # Normalizar UoM
     measure_code = record.get("sellMeasureCode") or inv.get("sellMeasureCode") or "EACH"
@@ -212,12 +213,19 @@ async def get_products(
         # Filter out deals with '*' or 'discontinued' in the description
         deals = [d for d in deals if is_product_active(d)]
         
+        # Extraer SKUs para buscar metadatos en una sola consulta
+        skus = [d.get("partNo") or d.get("inventory", {}).get("partNo") or d.get("id") for d in deals]
+        metadata_list = await db["products_metadata"].find({"sku": {"$in": skus}}).to_list(length=None)
+        metadata_map = {m["sku"]: m for m in metadata_list}
+
         for d in deals:
-            normalize_product_data(d, request, customer_pricing, is_authenticated=bool(current_user))
+            sku = d.get("partNo") or d.get("inventory", {}).get("partNo") or d.get("id")
+            normalize_product_data(d, request, customer_pricing, is_authenticated=bool(current_user), metadata=metadata_map.get(sku))
             
-        # Pagination for deals
+        # Pagination for deals (limit 0 means all)
+        end = actual_start + limit if limit > 0 else None
         return {
-            "records": deals[actual_start : actual_start + limit],
+            "records": deals[actual_start : end],
             "count": len(deals),
             "start": actual_start,
             "limit": limit
@@ -436,8 +444,15 @@ async def get_special_pricing(product_id: str, response: Response, current_user:
 @router.get("/deals/all")
 async def get_deals(request: Request):
     # Obtiene todas las ofertas activas desde Spire
+    db = get_database()
     deals = await spire_client.get_deals()
     deals = [d for d in deals if is_product_active(d)]
+
+    skus = [d.get("partNo") or d.get("inventory", {}).get("partNo") or d.get("id") for d in deals]
+    metadata_list = await db["products_metadata"].find({"sku": {"$in": skus}}).to_list(length=None)
+    metadata_map = {m["sku"]: m for m in metadata_list}
+
     for d in deals:
-        normalize_product_data(d, request, is_authenticated=False)
+        sku = d.get("partNo") or d.get("inventory", {}).get("partNo") or d.get("id")
+        normalize_product_data(d, request, is_authenticated=False, metadata=metadata_map.get(sku))
     return deals
