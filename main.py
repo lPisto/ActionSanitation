@@ -34,7 +34,7 @@ app.include_router(products.router, prefix="/api/products", tags=["Products"])
 app.include_router(orders.router, prefix="/api/orders", tags=["Orders"])
 app.include_router(resources.router, prefix="/api/resources", tags=["Resources"])
 app.include_router(contact.router, prefix="/api/contact", tags=["Contact"])
-app.include_router(payments.router, prefix="/api/stripe", tags=["Stripe"])
+app.include_router(payments.router, prefix="/api/payments", tags=["Stripe"])
 app.include_router(newsletter.router, prefix="/api/newsletter", tags=["newsletter"])
 
 @app.get("/api/health")
