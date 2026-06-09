@@ -3,7 +3,7 @@ from fastapi import FastAPI, Response
 from fastapi.middleware.cors import CORSMiddleware
 from contextlib import asynccontextmanager
 import os
-from Backend.app.api.endpoints import payments
+from app.api.endpoints import payments
 from app.api.endpoints import auth, products, users, orders, resources, contact, newsletter
 from app.core.config import settings
 from app.db.mongodb import connect_to_mongo, close_mongo_connection
