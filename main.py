@@ -3,7 +3,8 @@ from fastapi import FastAPI, Response
 from fastapi.middleware.cors import CORSMiddleware
 from contextlib import asynccontextmanager
 import os
-from app.api.endpoints import auth, products, users, orders, resources, contact, stripe_pay, newsletter
+from Backend.app.api.endpoints import payments
+from app.api.endpoints import auth, products, users, orders, resources, contact, newsletter
 from app.core.config import settings
 from app.db.mongodb import connect_to_mongo, close_mongo_connection
 from fastapi.responses import RedirectResponse
@@ -33,7 +34,7 @@ app.include_router(products.router, prefix="/api/products", tags=["Products"])
 app.include_router(orders.router, prefix="/api/orders", tags=["Orders"])
 app.include_router(resources.router, prefix="/api/resources", tags=["Resources"])
 app.include_router(contact.router, prefix="/api/contact", tags=["Contact"])
-app.include_router(stripe_pay.router, prefix="/api/stripe", tags=["Stripe"])
+app.include_router(payments.router, prefix="/api/stripe", tags=["Stripe"])
 app.include_router(newsletter.router, prefix="/api/newsletter", tags=["newsletter"])
 
 @app.get("/api/health")

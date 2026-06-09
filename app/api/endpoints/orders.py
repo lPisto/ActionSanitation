@@ -1,4 +1,3 @@
-import stripe
 import os
 from datetime import datetime
 from fastapi import APIRouter, Depends, HTTPException, Request
@@ -16,7 +15,16 @@ import httpx
 import xml.etree.ElementTree as ET
 
 router = APIRouter()
-stripe.api_key = settings.STRIPE_API_KEY
+
+async def verify_converge_transaction(txn_id: str):
+    """Consulta el estado de una transacción en Elavon EPG REST API"""
+    url = f"{settings.CONVERGE_URL.rstrip('/')}/transactions/{txn_id}"
+
+    async with httpx.AsyncClient() as client:
+        resp = await client.get(url, auth=(settings.ELAVON_SECRET_KEY, ""))
+        if resp.status_code != 200:
+            return None
+        return resp.json()
 
 class ShippingItem(BaseModel):
     product_id: str
@@ -115,18 +123,18 @@ async def calculate_shipping(req: ShippingRequest):
 async def create_order(order: OrderCreate, current_user: UserInDB = Depends(get_current_user)):
     total_amount = 0.0
 
-    # 1. Validate Stripe Payment Intent
+    # 1. Validate Converge Transaction
     if order.stripe_payment_intent_id:
-        try:
-            intent = stripe.PaymentIntent.retrieve(order.stripe_payment_intent_id)
-            if intent.status != "succeeded":
-                raise HTTPException(status_code=400, detail=f"Payment not successful. Status: {intent.status}")
-            # Extraemos el total real cobrado por Stripe (incluye taxes y shipping)
-            total_amount = intent.amount / 100.0
-        except stripe.error.StripeError as e:
-            raise HTTPException(status_code=400, detail=f"Stripe Error: {e.error.message}")
+        txn_data = await verify_converge_transaction(order.stripe_payment_intent_id)
+        
+        # En EPG REST, el estado exitoso suele ser "COMPLETED"
+        if not txn_data or txn_data.get("state") != "COMPLETED":
+            error_msg = txn_data.get("errorMessage", "Transaction not found or declined")
+            raise HTTPException(status_code=400, detail=f"Payment validation failed: {error_msg}")
+            
+        total_amount = float(txn_data.get("amount", 0.0))
     else:
-        raise HTTPException(status_code=400, detail="Missing stripe_payment_intent_id. Cannot create order without a valid payment.")
+        raise HTTPException(status_code=400, detail="Missing transaction ID. Cannot create order without a valid payment.")
 
     # 2. Map to Spire Order format according to the API schema
     spire_order = {
