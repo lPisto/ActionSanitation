@@ -16,7 +16,15 @@ def is_product_active(product_data: dict) -> bool:
     if not description:
         description = product_data.get("description", "")
     
-    if "*" in description or "discontinued" in description.lower() or "do not use" in description.lower() or "disc" in description.lower():
+    normalized_description = description.lower().replace(" ", "")
+    if (
+        "*" in description
+        or "discontinued" in description.lower()
+        or "do not use" in description.lower()
+        or "disc" in description.lower()
+        or "sample" in description.lower()
+        or "500ml" in normalized_description
+    ):
         return False
         
     # Extraer el precio dependiendo de si es una oferta o un producto regular de inventario
@@ -124,6 +132,8 @@ def normalize_product_data(record: dict, request: Request = None, customer_prici
     record["long_description"] = long_desc if long_desc != product_name else ""
     record["frontend_categories"] = metadata.get("subcategories", []) if metadata else []
     record["sds_url"] = metadata.get("sds_url") if metadata else None
+    record["data_sheet_url"] = metadata.get("data_sheet_url") if metadata else None
+    record["is_dangerous_good"] = metadata.get("is_dangerous_good", False) if metadata else False
     
     # Normalizar UoM
     measure_code = record.get("sellMeasureCode") or inv.get("sellMeasureCode") or "EACH"

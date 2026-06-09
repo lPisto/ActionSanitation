@@ -102,7 +102,12 @@ async def register(user_in: UserCreate):
         street_address=user_in.street_address,
         zip=user_in.zip,
         state_province=user_in.state_province,
-        country=user_in.country
+        country=user_in.country,
+        billing_street_address=user_in.billing_street_address,
+        billing_city=user_in.billing_city,
+        billing_state_province=user_in.billing_state_province,
+        billing_zip=user_in.billing_zip,
+        billing_country=user_in.billing_country
     )
     
     user_doc = {

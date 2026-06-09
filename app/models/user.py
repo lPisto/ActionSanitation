@@ -11,6 +11,11 @@ class UserCreate(BaseModel):
     zip: str
     state_province: str
     country: str
+    billing_street_address: Optional[str] = None
+    billing_city: Optional[str] = None
+    billing_state_province: Optional[str] = None
+    billing_zip: Optional[str] = None
+    billing_country: Optional[str] = None
     email: EmailStr
     password: str
     confirm_password: str
@@ -25,6 +30,11 @@ class UserUpdate(BaseModel):
     zip: Optional[str] = None
     state_province: Optional[str] = None
     country: Optional[str] = None
+    billing_street_address: Optional[str] = None
+    billing_city: Optional[str] = None
+    billing_state_province: Optional[str] = None
+    billing_zip: Optional[str] = None
+    billing_country: Optional[str] = None
     email: Optional[EmailStr] = None
 
 class UserInDB(BaseModel):
@@ -40,6 +50,11 @@ class UserInDB(BaseModel):
     zip: str
     state_province: str
     country: str
+    billing_street_address: Optional[str] = None
+    billing_city: Optional[str] = None
+    billing_state_province: Optional[str] = None
+    billing_zip: Optional[str] = None
+    billing_country: Optional[str] = None
 
 class Token(BaseModel):
     access_token: str

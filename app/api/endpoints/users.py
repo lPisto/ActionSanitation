@@ -62,15 +62,21 @@ async def update_user_me(user_update: UserUpdate, current_user: UserInDB = Depen
             raise HTTPException(status_code=500, detail=f"Unexpected error communicating with Spire: {str(e)}")
 
     # 2. Update local DB (MongoDB)
-    if user_update.first_name: current_user.first_name = user_update.first_name
-    if user_update.last_name: current_user.last_name = user_update.last_name
-    if user_update.company: current_user.company = user_update.company
-    if user_update.phone_number: current_user.phone_number = user_update.phone_number
-    if user_update.city: current_user.city = user_update.city
-    if user_update.street_address: current_user.street_address = user_update.street_address
-    if user_update.zip: current_user.zip = user_update.zip
-    if user_update.state_province: current_user.state_province = user_update.state_province
-    if user_update.country: current_user.country = user_update.country
+    if user_update.first_name is not None: current_user.first_name = user_update.first_name
+    if user_update.last_name is not None: current_user.last_name = user_update.last_name
+    if user_update.company is not None: current_user.company = user_update.company
+    if user_update.phone_number is not None: current_user.phone_number = user_update.phone_number
+    if user_update.city is not None: current_user.city = user_update.city
+    if user_update.street_address is not None: current_user.street_address = user_update.street_address
+    if user_update.zip is not None: current_user.zip = user_update.zip
+    if user_update.state_province is not None: current_user.state_province = user_update.state_province
+    if user_update.country is not None: current_user.country = user_update.country
+    
+    if user_update.billing_street_address is not None: current_user.billing_street_address = user_update.billing_street_address
+    if user_update.billing_city is not None: current_user.billing_city = user_update.billing_city
+    if user_update.billing_state_province is not None: current_user.billing_state_province = user_update.billing_state_province
+    if user_update.billing_zip is not None: current_user.billing_zip = user_update.billing_zip
+    if user_update.billing_country is not None: current_user.billing_country = user_update.billing_country
     
     # Save back to MongoDB
     db = get_database()
