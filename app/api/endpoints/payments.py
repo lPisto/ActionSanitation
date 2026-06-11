@@ -25,10 +25,14 @@ class PaymentIntentRequest(BaseModel):
     customer_email: Optional[str] = None
     items: Optional[List[dict]] = []
     shipping_address: Optional[str] = None
+    shipping_address_details: Optional[dict] = None
     shipping_method: Optional[str] = None
     billing_address: Optional[str] = None
+    billing_address_details: Optional[dict] = None
     po_number: Optional[str] = None
     order_notes: Optional[str] = None
+    shipping_cost: Optional[float] = 0.0
+    tax_amount: Optional[float] = 0.0
 
 async def update_local_order_status(intent_id: str, new_status: str, error_msg: str = None):
     try:
@@ -177,15 +181,18 @@ async def create_payment_intent(request: PaymentIntentRequest):
             "elavon_order_id": order_id,
             "elavon_order_href": order_href,
             "elavon_payment_session_href": session_href,
-            "spire_order_no": "Pending",
             "customer_email": request.customer_email,
             "total_amount": request.amount,
             "items": request.items,
             "shipping_address": normalize_address(request.shipping_address) or None,
+            "shipping_address_details": request.shipping_address_details,
             "shipping_method": request.shipping_method,
             "billing_address": normalize_address(request.billing_address) or None,
+            "billing_address_details": request.billing_address_details,
             "po_number": (request.po_number or "").strip() or None,
             "order_notes": (request.order_notes or "").strip() or None,
+            "shipping_cost": request.shipping_cost or 0.0,
+            "tax_amount": request.tax_amount or 0.0,
             "status": "Payment Pending",
             "provider": "Elavon",
             "updated_at": now
@@ -195,7 +202,7 @@ async def create_payment_intent(request: PaymentIntentRequest):
             {"id": local_order_id},
             {
                 "$set": local_order,
-                "$setOnInsert": {"created_at": now}
+                "$setOnInsert": {"created_at": now, "spire_order_no": None}
             },
             upsert=True
         )

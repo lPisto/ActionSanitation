@@ -2,10 +2,12 @@ from fastapi import APIRouter, Depends, Query, Response, HTTPException, Request
 import base64
 import os
 import json
+from datetime import datetime
 from app.services.spire_client import spire_client
 from app.api.deps import get_current_user, get_optional_current_user, get_database
 from app.models.user import UserInDB
 from typing import Optional
+from pydantic import BaseModel
 
 router = APIRouter()
 
@@ -59,6 +61,122 @@ def is_product_active(product_data: dict) -> bool:
         pass
         
     return True
+
+class ProductReviewCreate(BaseModel):
+    rating: int
+    comment: Optional[str] = None
+
+def normalize_number_string(value) -> Optional[str]:
+    if value in (None, ""):
+        return None
+    try:
+        number = float(value)
+    except (TypeError, ValueError):
+        return str(value)
+    if number <= 0:
+        return None
+    return f"{number:g}"
+
+def first_value(*values):
+    for value in values:
+        normalized = normalize_number_string(value)
+        if normalized:
+            return normalized
+    return None
+
+def normalize_physical_fields(record: dict, inv: dict, uom: dict):
+    record["weight"] = first_value(
+        record.get("weight"),
+        inv.get("weight"),
+        (uom or {}).get("weight"),
+        record.get("shippingWeight"),
+        inv.get("shippingWeight"),
+    )
+
+    dimensions = {
+        "length": first_value(
+            record.get("length"),
+            inv.get("length"),
+            (uom or {}).get("length"),
+            record.get("shipLength"),
+            inv.get("shipLength"),
+            (uom or {}).get("shipLength"),
+            record.get("shippingLength"),
+            inv.get("shippingLength"),
+            (uom or {}).get("shippingLength"),
+            record.get("dimLength"),
+            inv.get("dimLength"),
+            (uom or {}).get("dimLength"),
+        ),
+        "width": first_value(
+            record.get("width"),
+            inv.get("width"),
+            (uom or {}).get("width"),
+            record.get("shipWidth"),
+            inv.get("shipWidth"),
+            (uom or {}).get("shipWidth"),
+            record.get("shippingWidth"),
+            inv.get("shippingWidth"),
+            (uom or {}).get("shippingWidth"),
+            record.get("dimWidth"),
+            inv.get("dimWidth"),
+            (uom or {}).get("dimWidth"),
+        ),
+        "height": first_value(
+            record.get("height"),
+            inv.get("height"),
+            (uom or {}).get("height"),
+            record.get("shipHeight"),
+            inv.get("shipHeight"),
+            (uom or {}).get("shipHeight"),
+            record.get("shippingHeight"),
+            inv.get("shippingHeight"),
+            (uom or {}).get("shippingHeight"),
+            record.get("dimHeight"),
+            inv.get("dimHeight"),
+            (uom or {}).get("dimHeight"),
+        ),
+        "depth": first_value(
+            record.get("depth"),
+            inv.get("depth"),
+            (uom or {}).get("depth"),
+            record.get("shipDepth"),
+            inv.get("shipDepth"),
+            (uom or {}).get("shipDepth"),
+            record.get("shippingDepth"),
+            inv.get("shippingDepth"),
+            (uom or {}).get("shippingDepth"),
+            record.get("dimDepth"),
+            inv.get("dimDepth"),
+            (uom or {}).get("dimDepth"),
+        ),
+    }
+    dimensions = {key: value for key, value in dimensions.items() if value}
+    record["shipping_dimensions"] = dimensions
+
+async def get_review_summary_map(db, product_ids: list[str]) -> dict:
+    product_ids = [pid for pid in product_ids if pid]
+    if not product_ids:
+        return {}
+
+    pipeline = [
+        {"$match": {"product_id": {"$in": product_ids}}},
+        {"$group": {"_id": "$product_id", "rating": {"$avg": "$rating"}, "reviews": {"$sum": 1}}},
+    ]
+    rows = await db["product_reviews"].aggregate(pipeline).to_list(length=None)
+    return {
+        row["_id"]: {
+            "rating": round(float(row.get("rating") or 0), 1),
+            "reviews": int(row.get("reviews") or 0),
+        }
+        for row in rows
+    }
+
+def apply_review_summary(record: dict, summary_map: dict):
+    sku = record.get("partNo") or record.get("inventory", {}).get("partNo") or record.get("id")
+    summary = summary_map.get(str(sku), {"rating": 0, "reviews": 0})
+    record["rating"] = summary["rating"]
+    record["reviews"] = summary["reviews"]
 
 def normalize_product_data(record: dict, request: Request = None, customer_pricing: dict = None, is_authenticated: bool = True, metadata: dict = None) -> dict:
     inv = record.get("inventory", {})
@@ -142,6 +260,8 @@ def normalize_product_data(record: dict, request: Request = None, customer_prici
         record["unitOfMeasures"] = {measure_code: uom}
     elif "unitOfMeasures" not in record:
         record["unitOfMeasures"] = {measure_code: {"description": measure_code}}
+
+    normalize_physical_fields(record, inv, uom if isinstance(uom, dict) else {})
         
     # Normalizar Precios
     pricing = record.get("pricing") or inv.get("pricing")
@@ -227,10 +347,12 @@ async def get_products(
         skus = [d.get("partNo") or d.get("inventory", {}).get("partNo") or d.get("id") for d in deals]
         metadata_list = await db["products_metadata"].find({"sku": {"$in": skus}}).to_list(length=None)
         metadata_map = {m["sku"]: m for m in metadata_list}
+        review_summary_map = await get_review_summary_map(db, [str(sku) for sku in skus])
 
         for d in deals:
             sku = d.get("partNo") or d.get("inventory", {}).get("partNo") or d.get("id")
             normalize_product_data(d, request, customer_pricing, is_authenticated=bool(current_user), metadata=metadata_map.get(sku))
+            apply_review_summary(d, review_summary_map)
             
         # Pagination for deals (limit 0 means all)
         end = actual_start + limit if limit > 0 else None
@@ -279,6 +401,7 @@ async def get_products(
         # Obtener metadatos desde MongoDB
         metadata_list = await db["products_metadata"].find({"sku": {"$in": skus}}).to_list(length=None)
         metadata_map = {m["sku"]: m for m in metadata_list}
+        review_summary_map = await get_review_summary_map(db, [str(sku) for sku in skus])
         
         filtered_records = []
         
@@ -288,6 +411,7 @@ async def get_products(
             cats = meta.get("subcategories", []) if meta else []
             
             normalize_product_data(record, request, customer_pricing, is_authenticated=bool(current_user), metadata=meta)
+            apply_review_summary(record, review_summary_map)
             
             # Lógica de filtrado en memoria
             # Si el cliente está filtrando usando códigos directos de Spire (final_dept/final_group) o búsqueda de texto (q_param), 
@@ -350,7 +474,59 @@ async def get_product(product_id: str, request: Request, current_user: Optional[
     # Buscar metadata individual
     metadata = await db["products_metadata"].find_one({"sku": actual_part_no})
 
-    return normalize_product_data(product, request, customer_pricing, is_authenticated=bool(current_user), metadata=metadata)
+    normalized = normalize_product_data(product, request, customer_pricing, is_authenticated=bool(current_user), metadata=metadata)
+    review_summary_map = await get_review_summary_map(db, [str(actual_part_no)])
+    apply_review_summary(normalized, review_summary_map)
+    return normalized
+
+@router.get("/{product_id}/reviews")
+async def get_product_reviews(product_id: str):
+    db = get_database()
+    reviews = await db["product_reviews"].find({"product_id": product_id}).sort("created_at", -1).to_list(length=None)
+    for review in reviews:
+        review["_id"] = str(review["_id"])
+
+    summary_map = await get_review_summary_map(db, [product_id])
+    summary = summary_map.get(product_id, {"rating": 0, "reviews": 0})
+    return {
+        "product_id": product_id,
+        "rating": summary["rating"],
+        "reviews": summary["reviews"],
+        "items": reviews,
+    }
+
+@router.post("/{product_id}/reviews")
+async def create_product_review(product_id: str, review: ProductReviewCreate, current_user: UserInDB = Depends(get_current_user)):
+    if review.rating < 1 or review.rating > 5:
+        raise HTTPException(status_code=400, detail="Rating must be between 1 and 5.")
+
+    db = get_database()
+    now = datetime.utcnow().isoformat()
+    reviewer_name = f"{current_user.first_name} {current_user.last_name}".strip()
+    await db["product_reviews"].update_one(
+        {"product_id": product_id, "user_email": current_user.email},
+        {
+            "$set": {
+                "product_id": product_id,
+                "user_email": current_user.email,
+                "user_name": reviewer_name,
+                "rating": review.rating,
+                "comment": (review.comment or "").strip(),
+                "updated_at": now,
+            },
+            "$setOnInsert": {"created_at": now},
+        },
+        upsert=True,
+    )
+
+    summary_map = await get_review_summary_map(db, [product_id])
+    summary = summary_map.get(product_id, {"rating": 0, "reviews": 0})
+    return {
+        "message": "Review saved",
+        "product_id": product_id,
+        "rating": summary["rating"],
+        "reviews": summary["reviews"],
+    }
 
 @router.get("/{product_id}/image")
 @router.get("/{product_id}/image/{image_id}")
@@ -461,8 +637,10 @@ async def get_deals(request: Request):
     skus = [d.get("partNo") or d.get("inventory", {}).get("partNo") or d.get("id") for d in deals]
     metadata_list = await db["products_metadata"].find({"sku": {"$in": skus}}).to_list(length=None)
     metadata_map = {m["sku"]: m for m in metadata_list}
+    review_summary_map = await get_review_summary_map(db, [str(sku) for sku in skus])
 
     for d in deals:
         sku = d.get("partNo") or d.get("inventory", {}).get("partNo") or d.get("id")
         normalize_product_data(d, request, is_authenticated=False, metadata=metadata_map.get(sku))
+        apply_review_summary(d, review_summary_map)
     return deals

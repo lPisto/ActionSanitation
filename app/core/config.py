@@ -45,6 +45,7 @@ class Settings(BaseSettings):
     FRONTEND_URLS: str
 
     CLOUDINARY_URL: str
+    ACCOUNT_APPROVAL_TOKEN: str | None = None
   
 
     class Config:

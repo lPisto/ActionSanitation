@@ -30,6 +30,8 @@ class Settings(BaseSettings):
     ELAVON_SECRET_KEY: str
     # El alias suele ser el nombre comercial, guárdalo por si acaso
     ELAVON_MERCHANT_ALIAS: str
+
+    ACCOUNT_APPROVAL_TOKEN: str
     
     
 

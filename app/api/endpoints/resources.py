@@ -1,9 +1,8 @@
 import os
 import uuid
-import shutil
 import cloudinary
 import cloudinary.uploader
-from fastapi import APIRouter, File, UploadFile, Form, HTTPException, Query, Request
+from fastapi import APIRouter, File, UploadFile, Form, HTTPException, Request
 from typing import List, Optional
 from app.db.mongodb import get_database
 from dotenv import load_dotenv
@@ -100,35 +99,6 @@ async def get_training_materials():
     for item in items:
         item["_id"] = str(item["_id"])
     return items
-
-# --- VENDOR MSDS BROWSER ENDPOINT ---
-
-@router.get("/vendor-msds")
-async def get_vendor_msds(request: Request, folder: str = Query("")):
-    db = get_database()
-    # Normalize folder path to prevent slashes issues
-    folder_path = folder.replace("\\", "/").strip("/")
-    
-    # Query MongoDB for items in this specific folder
-    items = await db["vendor_msds"].find({"parent_folder": folder_path}).to_list(length=None)
-    
-    result = []
-    base_url = str(request.base_url).rstrip('/')
-    
-    for item in items:
-        url = item.get("url")
-        if url and url.startswith("/"):
-            url = f"{base_url}{url}"
-            
-        result.append({
-            "name": item["name"],
-            "type": item["type"],
-            "url": url
-        })
-            
-    # Sort: folders first, then files
-    result.sort(key=lambda x: (x["type"] == "file", x["name"].lower()))
-    return result
 
 # --- UPLOAD (POST) ENDPOINTS ---
 

@@ -55,6 +55,8 @@ class UserInDB(BaseModel):
     billing_state_province: Optional[str] = None
     billing_zip: Optional[str] = None
     billing_country: Optional[str] = None
+    account_status: str = "approved"
+    approved: bool = True
 
 class Token(BaseModel):
     access_token: str
