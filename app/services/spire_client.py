@@ -3,6 +3,7 @@ from fastapi import HTTPException
 from app.core.config import settings
 import base64
 import json
+import re
 
 class SpireClient:
     def __init__(self):
@@ -97,10 +98,39 @@ class SpireClient:
             raise HTTPException(status_code=404, detail="Customer not found in Spire")
         return records[0]
 
+    @staticmethod
+    def _normalize_email(email: str) -> str:
+        return str(email or "").strip().lower()
+
+    @classmethod
+    def _extract_emails(cls, value):
+        emails = []
+        if isinstance(value, dict):
+            for key, nested in value.items():
+                key_name = str(key).lower()
+                if key_name in {"email", "emailaddress", "email_address"}:
+                    emails.append(nested)
+                if isinstance(nested, (dict, list)):
+                    emails.extend(cls._extract_emails(nested))
+        elif isinstance(value, list):
+            for item in value:
+                emails.extend(cls._extract_emails(item))
+        return emails
+
+    @classmethod
+    def _record_matches_email(cls, record: dict, email: str) -> bool:
+        target = cls._normalize_email(email)
+        for candidate in cls._extract_emails(record):
+            parts = re.split(r"[\s,;]+", str(candidate or ""))
+            if target in {cls._normalize_email(part) for part in parts}:
+                return True
+        return False
+
     async def get_customer_by_email(self, email: str):
-        res = await self._request("GET", "customers/", params={"q": email})
+        normalized_email = self._normalize_email(email)
+        res = await self._request("GET", "customers/", params={"q": normalized_email, "limit": 100})
         for record in res.get("records", []):
-            if record.get("address", {}).get("email", "").lower() == email.lower():
+            if self._record_matches_email(record, normalized_email):
                 return record
         return None
 

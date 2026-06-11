@@ -213,9 +213,16 @@ async def approve_account(req: AccountApprovalRequest, x_admin_token: Optional[s
         )
         return {"message": "Account rejected"}
 
-    spire_customer_no = req.spire_customer_no or user_doc.get("spire_customer_no")
+    requested_spire_customer_no = (req.spire_customer_no or "").strip()
+    existing_spire_customer_no = (user_doc.get("spire_customer_no") or "").strip()
+    spire_customer_no = requested_spire_customer_no or existing_spire_customer_no
 
     if req.create_spire_customer:
+        if spire_customer_no:
+            raise HTTPException(
+                status_code=400,
+                detail="This account already has a Spire customer number. Approve the existing Spire customer instead of creating a new one."
+            )
         generated_customer_no = f"W{uuid.uuid4().hex[:9]}".upper()
         user_in = user_create_from_record(user_record)
         spire_customer_data = build_spire_customer_payload(user_in, generated_customer_no)
