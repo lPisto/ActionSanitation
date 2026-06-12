@@ -6,6 +6,7 @@ from datetime import datetime
 from uuid import uuid4
 from app.core.config import settings
 from app.db.mongodb import get_database
+from app.services.shipping_rules import calculate_shipping_breakdown, items_total, round_money
 
 router = APIRouter()
 
@@ -90,10 +91,19 @@ async def create_payment_intent(request: PaymentIntentRequest):
             "Accept": "application/json"
         }
         local_order_id = request.order_id or f"web_{uuid4().hex[:12]}"
+        subtotal = items_total(request.items or [])
+        shipping_breakdown = calculate_shipping_breakdown(subtotal, request.items or [], request.shipping_method)
+        shipping_cost = shipping_breakdown["shipping_cost"]
+        tax_amount = round_money(request.tax_amount)
+        amount = round_money(request.amount)
+        if subtotal > 0:
+            expected_amount = round_money(subtotal + shipping_cost + tax_amount)
+            if amount < expected_amount:
+                amount = expected_amount
 
         order_payload = {
             "total": {
-                "amount": f"{request.amount:.2f}",
+                "amount": f"{amount:.2f}",
                 "currencyCode": request.currency.upper()
             },
             "description": f"Order {local_order_id}",
@@ -182,7 +192,7 @@ async def create_payment_intent(request: PaymentIntentRequest):
             "elavon_order_href": order_href,
             "elavon_payment_session_href": session_href,
             "customer_email": request.customer_email,
-            "total_amount": request.amount,
+            "total_amount": amount,
             "items": request.items,
             "shipping_address": normalize_address(request.shipping_address) or None,
             "shipping_address_details": request.shipping_address_details,
@@ -191,8 +201,8 @@ async def create_payment_intent(request: PaymentIntentRequest):
             "billing_address_details": request.billing_address_details,
             "po_number": (request.po_number or "").strip() or None,
             "order_notes": (request.order_notes or "").strip() or None,
-            "shipping_cost": request.shipping_cost or 0.0,
-            "tax_amount": request.tax_amount or 0.0,
+            "shipping_cost": shipping_cost,
+            "tax_amount": tax_amount,
             "status": "Payment Pending",
             "provider": "Elavon",
             "updated_at": now

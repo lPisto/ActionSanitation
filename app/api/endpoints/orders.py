@@ -10,12 +10,12 @@ from app.models.order import OrderCreate, OrderResponse
 from app.core.config import settings
 from app.db.mongodb import get_database
 from app.services.email_service import send_order_confirmation_email
+from app.services.shipping_rules import calculate_shipping_breakdown
 import json
 import httpx
 import xml.etree.ElementTree as ET
 
 router = APIRouter()
-DANGEROUS_GOODS_SHIPPING_SURCHARGE = float(os.getenv("DANGEROUS_GOODS_SHIPPING_SURCHARGE", "20"))
 SPIRE_WEB_SALESPERSON = os.getenv("SPIRE_WEB_SALESPERSON", "00")
 DIRECT_ORDER_PAYMENT_METHODS = {"on_account", "e_transfer"}
 
@@ -304,6 +304,8 @@ class ShippingItem(BaseModel):
     product_id: str
     quantity: int
     weight_kg: float = 0.0
+    sku: Optional[str] = None
+    name: Optional[str] = None
     is_dangerous_good: bool = False
 
 class ShippingRequest(BaseModel):
@@ -312,16 +314,7 @@ class ShippingRequest(BaseModel):
     subtotal: float
 
 def calculate_shipping_cost_response(req: ShippingRequest) -> dict:
-    has_dangerous_goods = any(item.is_dangerous_good for item in req.items)
-    base_shipping_cost = 0.0 if req.subtotal >= 250 else 20.0
-    dangerous_goods_surcharge = DANGEROUS_GOODS_SHIPPING_SURCHARGE if has_dangerous_goods else 0.0
-
-    return {
-        "shipping_cost": base_shipping_cost + dangerous_goods_surcharge,
-        "base_shipping_cost": base_shipping_cost,
-        "dangerous_goods_surcharge": dangerous_goods_surcharge,
-        "has_dangerous_goods": has_dangerous_goods
-    }
+    return calculate_shipping_breakdown(req.subtotal, req.items)
 
 def get_product_weight(product_id: str) -> float:
     try:
@@ -442,6 +435,15 @@ async def create_order(order: OrderCreate, current_user: UserInDB = Depends(get_
     money = resolve_order_money(order, existing_order, source_items)
     shipping_cost = money["shipping_cost"]
     tax_amount = money["tax_amount"]
+    shipping_breakdown = calculate_shipping_breakdown(money["subtotal"], source_items, order.shipping_method)
+    required_shipping_cost = round_money(shipping_breakdown["shipping_cost"])
+    if shipping_cost < required_shipping_cost:
+        shipping_cost = required_shipping_cost
+        money["shipping_cost"] = shipping_cost
+
+    expected_total = round_money(money["subtotal"] + shipping_cost + tax_amount)
+    if money["total_amount"] < expected_total:
+        money["total_amount"] = expected_total
 
     # 1. Validate Converge Transaction (unless On Account)
     if order.payment_method in DIRECT_ORDER_PAYMENT_METHODS:
@@ -469,6 +471,11 @@ async def create_order(order: OrderCreate, current_user: UserInDB = Depends(get_
             raise HTTPException(status_code=400, detail=f"Payment validation failed: {error_msg}")
             
         total_amount = payment_amount(txn_data, existing_order)
+        if total_amount + 0.01 < expected_total:
+            raise HTTPException(
+                status_code=400,
+                detail="Order total does not include the dangerous goods shipping surcharge. Please restart checkout."
+            )
         transaction_id = txn_data.get("id") or payment_txn_id
         order.stripe_payment_intent_id = transaction_id
         if existing_order and transaction_id:

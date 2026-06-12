@@ -4,6 +4,11 @@ import os
 import json
 from datetime import datetime
 from app.services.spire_client import spire_client
+from app.services.product_rules import (
+    clean_dangerous_good_marker,
+    product_is_dangerous_good,
+    product_upload_is_enabled,
+)
 from app.api.deps import get_current_user, get_optional_current_user, get_database
 from app.models.user import UserInDB
 from typing import Optional
@@ -12,19 +17,24 @@ from pydantic import BaseModel
 router = APIRouter()
 
 def is_product_active(product_data: dict) -> bool:
+    if not product_upload_is_enabled(product_data):
+        return False
+
     # For deals (price_matrix), description is often nested
     description = product_data.get("inventory", {}).get("description", "")
     # For direct products (inventory/items), or as a fallback, check root
     if not description:
         description = product_data.get("description", "")
     
-    normalized_description = description.lower().replace(" ", "")
+    display_description = clean_dangerous_good_marker(description)
+    normalized_description = display_description.lower().replace(" ", "")
+    description_lower = display_description.lower()
     if (
-        "*" in description
-        or "discontinued" in description.lower()
-        or "do not use" in description.lower()
-        or "disc" in description.lower()
-        or "sample" in description.lower()
+        "*" in display_description
+        or "discontinued" in description_lower
+        or "do not use" in description_lower
+        or "disc" in description_lower
+        or "sample" in description_lower
         or "500ml" in normalized_description
     ):
         return False
@@ -233,10 +243,12 @@ def normalize_product_data(record: dict, request: Request = None, customer_prici
 
     # --- Gestión de Descripciones ---
     # En Spire, 'description' es el Nombre/Título del producto.
-    product_name = (record.get("description") or inv.get("description", "")).strip()
+    raw_product_name = (record.get("description") or inv.get("description", "")).strip()
+    is_dangerous_good = product_is_dangerous_good(record, metadata)
+    product_name = clean_dangerous_good_marker(raw_product_name)
     
     record["title"] = product_name
-    # Mantenemos 'name' y 'description' como el título original para el frontend.
+    # Mantenemos 'name' y 'description' como el título limpio para el frontend.
     record["name"] = product_name
     record["description"] = product_name
     record["short_description"] = product_name
@@ -247,11 +259,12 @@ def normalize_product_data(record: dict, request: Request = None, customer_prici
     # La descripción larga tiene prioridad: 1. Mongo, 2. Extended Spire.
     # Si es igual al nombre del producto, la dejamos vacía para evitar duplicidad visual.
     long_desc = mongo_long or spire_ext
-    record["long_description"] = long_desc if long_desc != product_name else ""
+    record["long_description"] = long_desc if long_desc not in (product_name, raw_product_name) else ""
     record["frontend_categories"] = metadata.get("subcategories", []) if metadata else []
     record["sds_url"] = metadata.get("sds_url") if metadata else None
     record["data_sheet_url"] = metadata.get("data_sheet_url") if metadata else None
-    record["is_dangerous_good"] = metadata.get("is_dangerous_good", False) if metadata else False
+    record["is_dangerous_good"] = is_dangerous_good
+    record["upload"] = product_upload_is_enabled(record)
     
     # Normalizar UoM
     measure_code = record.get("sellMeasureCode") or inv.get("sellMeasureCode") or "EACH"
@@ -452,6 +465,9 @@ async def get_departments():
 @router.get("/{product_id}")
 async def get_product(product_id: str, request: Request, current_user: Optional[UserInDB] = Depends(get_optional_current_user)):
     product = await spire_client.get_product(product_id)
+    if not product_upload_is_enabled(product):
+        raise HTTPException(status_code=404, detail="Product not found")
+
     db = get_database()
     
     customer_pricing = {}
