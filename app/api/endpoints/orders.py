@@ -474,7 +474,7 @@ async def create_order(order: OrderCreate, current_user: UserInDB = Depends(get_
         if total_amount + 0.01 < expected_total:
             raise HTTPException(
                 status_code=400,
-                detail="Order total does not include the dangerous goods shipping surcharge. Please restart checkout."
+                detail="Order total does not include the D.G. shipping surcharge. Please restart checkout."
             )
         transaction_id = txn_data.get("id") or payment_txn_id
         order.stripe_payment_intent_id = transaction_id
