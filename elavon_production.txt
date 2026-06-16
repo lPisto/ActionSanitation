@@ -1,0 +1,88 @@
+Integration checklist
+Step 1 - Contact software technical support team/customer service
+
+To integrate using XML API, you will need to contact #sedevportalsupport@elavon.com. They can help you with the following:
+
+Providing a demo account for integration testing.
+Setting up a Converge API user account that has permission to post a session token request.
+Associating the Converge user ID with the eCommerce terminal.
+Whitelisting for IP and referrers in the demo environment.
+To register and add the IP address of the server to an allowed list for the production environment, contact the software technical support team or customer service at 1-800-377-3962 | Option 2 | Option 3.
+
+Step 2 - Integrate with XML API
+
+To use the Converge JavaScript Library, your server must have the following settings:
+
+All pages that use the Converge payment script must use HTTPS protocol.
+The domain must have a valid SSL certificate.
+The server must support TLS 1.2 or 1.3 with Perfect Forward Secrecy (PFS).
+Use the following endpoints in our demo environment.
+
+Endpoint: https://api.demo.convergepay.com/VirtualMerchantDemo/
+
+Transaction processing: /processxml.do
+Batch management: /processBatch.do
+Account settings: /accountxml.do
+For more details on the implementation, refer to the Integration Guide.
+
+Step 3 - Ensure your PCI compliance
+
+Elavon requires you and your merchants o support customer compliance with the Payment Card Industry–Data Security Standard (PCI-DSS) guidelines. You are required to validate PCI compliance as a PCI Level 1 Service Provider (SAQ D)
+ annually. This requires the submission of a Report on Compliance (ROC) based on an on-site audit completed by a Qualified Security Assessor (QSA) before processing.
+
+Subsequently, card brand registration is also required. PCI validation must be completed, and documentation provided to execute the registration process with each card brand network annually.
+
+The PCI-DSS are a set of requirements that enhance the security of payment account data. The core principles and requirements of the PCI-DSS are as follows:
+
+Build and maintain secure networks
+Protect cardholder data
+Maintain a vulnerability management program
+Implement strong access control measures
+Regular network monitoring and testing
+Maintain information security policies
+The Payment Application–Data Security Standard (PA–DSS) provides you the guidelines to develop secure payment applications that follow the PCI–DSS and don't store sensitive data. The summarized PA–DSS guidelines that payment applications integrating to Converge must comply with are:
+
+Non-retention of full magnetic stripe data, card validation code
+(CAV2, CID, CVV2, CVC2), or PIN block data.
+Protection of stored cardholder data.
+Availability of secure authentication features.
+Logging of payment application activities.
+Protection for wireless transmissions.
+Facilitation of secure network implementations.
+Non-collection and storing of cardholder data on an Internet-connected server.
+Facilitation of secure remote network updates.
+Facilitation of secure remote access to payment applications.
+Encryption of sensitive traffic over public networks.
+Encryption of all non-console administrative access.
+Maintenance of instructional documentation and training programs for you, your customers, and resellers.
+This table lists the PCI-DSS and PA-DSS resources for Data Security Compliance.
+
+Resource	Description
+PCI Security Standards Council
+An open global forum for ongoing development, enhancement, storage, dissemination, and implementation of security standards for account data protection.
+PCI Security Documents Library
+A list of documents covering a range of Payments Card Industry topics. If you need more information on PCI security and compliance, you can probably find some information here.
+PIN Transaction Security (PTS) Devices
+List of approved PTS devices.
+PCI Software Security Framework
+Complete list of software requirements and guidance for PCI Software Security Framework.
+PA–DSS Program Guide
+PCI’s PA – DSS Program Guide
+Step 4 - Test and certify your integration
+
+Once you have integrated your payment solution with Converge, we recommend that you test the integration. Here are the important links needed for testing your integration before going live:
+
+Only use Elavon-approved card numbers to test your integration. Refer to the test cards page for more information.
+If you receive any errors while testing, refer to the error codes page for more details.
+To certify your integration, you will be provided with a test script. The type and number of tests you need to run depends on your region, market segment and the transaction types you will accept as defined in your solution statement. Contact your solution engineer for more information.
+
+Step 5 - Go live
+
+Replace the demo endpoints with the production endpoints when you finish testing your integration.
+
+Transaction processing: https://api.convergepay.com/VirtualMerchant/processxml.do
+Batch management: https://api.convergepay.com/VirtualMerchant/processBatch.do
+Account settings: https://api.convergepay.com/VirtualMerchant/accountxml.do
+Activate your production account by contacting Elavon support.
+
+Use real cards to connect with Elavon's production server.

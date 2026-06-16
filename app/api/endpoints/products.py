@@ -1,8 +1,9 @@
-from fastapi import APIRouter, Depends, Query, Response, HTTPException, Request
+from fastapi import APIRouter, Depends, Query, Response, HTTPException, Request, Header
 import base64
 import os
 import json
 from datetime import datetime
+from app.core.config import settings
 from app.services.spire_client import spire_client
 from app.services.product_rules import (
     clean_dangerous_good_marker,
@@ -11,7 +12,7 @@ from app.services.product_rules import (
 )
 from app.api.deps import get_current_user, get_optional_current_user, get_database
 from app.models.user import UserInDB
-from typing import Optional
+from typing import Optional, List
 from pydantic import BaseModel
 
 router = APIRouter()
@@ -75,6 +76,36 @@ def is_product_active(product_data: dict) -> bool:
 class ProductReviewCreate(BaseModel):
     rating: int
     comment: Optional[str] = None
+
+class ProductCategoryAssignment(BaseModel):
+    department: str
+    group: str
+    item: Optional[str] = None
+
+class ProductCategoryUpdateRequest(BaseModel):
+    skus: List[str]
+    categories: List[ProductCategoryAssignment]
+    replace: bool = True
+
+def require_products_admin(x_admin_token: Optional[str]):
+    approval_token = getattr(settings, "ACCOUNT_APPROVAL_TOKEN", None)
+    if not approval_token:
+        raise HTTPException(status_code=503, detail="Admin token is not configured.")
+    if x_admin_token != approval_token:
+        raise HTTPException(status_code=403, detail="Invalid admin token.")
+
+def normalize_category_assignment(category: ProductCategoryAssignment) -> dict:
+    department = (category.department or "").strip().lower()
+    group = (category.group or "").strip()
+    item = (category.item or "").strip()
+
+    if not department or not group:
+        raise HTTPException(status_code=422, detail="Department and group are required.")
+
+    normalized = {"department": department, "group": group}
+    if item:
+        normalized["item"] = item
+    return normalized
 
 def normalize_number_string(value) -> Optional[str]:
     if value in (None, ""):
@@ -461,6 +492,84 @@ async def get_categories():
 async def get_departments():
     # Alternativamente, departamentos más amplios
     return await spire_client.get_sales_departments()
+
+@router.get("/admin/categories")
+async def get_product_category_metadata(x_admin_token: Optional[str] = Header(None)):
+    require_products_admin(x_admin_token)
+
+    db = get_database()
+    records = await db["products_metadata"].find(
+        {},
+        {"_id": 0, "sku": 1, "subcategories": 1}
+    ).to_list(length=None)
+
+    return [
+        {
+            "sku": record.get("sku"),
+            "subcategories": record.get("subcategories", [])
+        }
+        for record in records
+        if record.get("sku")
+    ]
+
+@router.patch("/admin/categories")
+async def update_product_categories(
+    request: ProductCategoryUpdateRequest,
+    x_admin_token: Optional[str] = Header(None)
+):
+    require_products_admin(x_admin_token)
+
+    skus = []
+    seen = set()
+    for sku in request.skus:
+        cleaned = str(sku or "").strip()
+        if cleaned and cleaned not in seen:
+            skus.append(cleaned)
+            seen.add(cleaned)
+
+    if not skus:
+        raise HTTPException(status_code=422, detail="At least one SKU is required.")
+
+    categories = [normalize_category_assignment(category) for category in request.categories]
+    if not categories:
+        raise HTTPException(status_code=422, detail="At least one category is required.")
+
+    db = get_database()
+    now = datetime.utcnow().isoformat()
+
+    if request.replace:
+        result = await db["products_metadata"].update_many(
+            {"sku": {"$in": skus}},
+            {"$set": {"subcategories": categories, "updated_at": now}},
+            upsert=False
+        )
+    else:
+        result = await db["products_metadata"].update_many(
+            {"sku": {"$in": skus}},
+            {
+                "$addToSet": {"subcategories": {"$each": categories}},
+                "$set": {"updated_at": now}
+            },
+            upsert=False
+        )
+
+    existing = await db["products_metadata"].distinct("sku", {"sku": {"$in": skus}})
+    existing_set = set(existing)
+    missing = [sku for sku in skus if sku not in existing_set]
+    if missing:
+        await db["products_metadata"].insert_many([
+            {"sku": sku, "subcategories": categories, "updated_at": now, "created_at": now}
+            for sku in missing
+        ])
+
+    return {
+        "updated": len(skus),
+        "matched": result.matched_count,
+        "modified": result.modified_count,
+        "inserted": len(missing),
+        "skus": skus,
+        "categories": categories,
+    }
 
 @router.get("/{product_id}")
 async def get_product(product_id: str, request: Request, current_user: Optional[UserInDB] = Depends(get_optional_current_user)):
