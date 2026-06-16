@@ -9,7 +9,7 @@ from app.models.user import UserInDB
 from app.models.order import OrderCreate, OrderResponse
 from app.core.config import settings
 from app.db.mongodb import get_database
-from app.services.email_service import send_order_confirmation_email
+from app.services.email_service import send_order_confirmation_email, send_pending_payment_order_notification_email
 from app.services.shipping_rules import calculate_shipping_breakdown
 import json
 import httpx
@@ -240,6 +240,39 @@ async def create_spire_order_with_fallback(order_data: dict) -> dict:
 
     fallback_without_freight = spire_fallback_payload(order_data, include_freight=False)
     return await spire_client.create_sales_order(fallback_without_freight)
+
+async def notify_staff_pending_payment_order(
+    current_user: UserInDB,
+    order: OrderCreate,
+    order_id: str,
+    local_order_id: str,
+    items: list,
+    total_amount: float,
+    shipping_address: str,
+    billing_address: str = "",
+    po_number: str = "",
+    order_notes: str = "",
+):
+    if order.payment_method not in DIRECT_ORDER_PAYMENT_METHODS:
+        return
+
+    try:
+        await send_pending_payment_order_notification_email(
+            customer_name=f"{current_user.first_name} {current_user.last_name}".strip(),
+            customer_email=current_user.email,
+            customer_company=current_user.company or "",
+            payment_method=order.payment_method,
+            order_id=order_id,
+            local_order_id=local_order_id,
+            items=items,
+            total_amount=total_amount,
+            shipping_address=shipping_address or "N/A",
+            billing_address=billing_address or "",
+            po_number=po_number or "",
+            order_notes=order_notes or "",
+        )
+    except Exception as e:
+        print(f"Error sending pending payment order notification: {e}")
 
 async def verify_converge_transaction(txn_id: str):
     """Consulta el estado de una transacción en Elavon EPG REST API"""
@@ -646,6 +679,7 @@ async def create_order(order: OrderCreate, current_user: UserInDB = Depends(get_
         # Registra el error detallado en la consola del backend
         print(f"Spire ERP Error details: {e.detail}")
         if order.payment_method == "e_transfer":
+            fallback_billing_address = resolve_billing_address(order.billing_address, shipping_address, existing_order)
             await db["orders"].update_one(
                 {"id": local_order_id},
                 {"$set": {
@@ -656,7 +690,7 @@ async def create_order(order: OrderCreate, current_user: UserInDB = Depends(get_
                     "total_amount": total_amount,
                     "shipping_address": shipping_address,
                     "shipping_address_details": shipping_address_details,
-                    "billing_address": resolve_billing_address(order.billing_address, shipping_address, existing_order),
+                    "billing_address": fallback_billing_address,
                     "billing_address_details": billing_address_details,
                     "shipping_cost": shipping_cost,
                     "tax_amount": tax_amount,
@@ -669,6 +703,18 @@ async def create_order(order: OrderCreate, current_user: UserInDB = Depends(get_
                     "updated_at": datetime.utcnow().isoformat()
                 }},
                 upsert=True
+            )
+            await notify_staff_pending_payment_order(
+                current_user=current_user,
+                order=order,
+                order_id=local_order_id,
+                local_order_id=local_order_id,
+                items=saved_items,
+                total_amount=total_amount,
+                shipping_address=shipping_address,
+                billing_address=fallback_billing_address or "",
+                po_number=po_number or "",
+                order_notes=order_notes or "",
             )
             return {
                 "order_id": local_order_id,
@@ -713,7 +759,21 @@ async def create_order(order: OrderCreate, current_user: UserInDB = Depends(get_
         upsert=True
     )
 
-    # 5. Enviar email de confirmación
+    # 5. Notify staff when payment will be handled outside the online card flow.
+    await notify_staff_pending_payment_order(
+        current_user=current_user,
+        order=order,
+        order_id=str(spire_order_no),
+        local_order_id=str(local_order_id),
+        items=saved_items,
+        total_amount=total_amount,
+        shipping_address=shipping_address,
+        billing_address=billing_address or "",
+        po_number=po_number or "",
+        order_notes=order_notes or "",
+    )
+
+    # 6. Enviar email de confirmación
     try:
         await send_order_confirmation_email(
             to_email=current_user.email,

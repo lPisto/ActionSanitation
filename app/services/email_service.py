@@ -103,6 +103,79 @@ async def send_order_confirmation_email(to_email: str, name: str, order_id: str,
         html_content=html
     )
 
+async def send_pending_payment_order_notification_email(
+    customer_name: str,
+    customer_email: str,
+    customer_company: str,
+    payment_method: str,
+    order_id: str,
+    local_order_id: str,
+    items: list,
+    total_amount: float,
+    shipping_address: str,
+    billing_address: str = "",
+    po_number: str = "",
+    order_notes: str = "",
+):
+    if not getattr(settings, "SALES_EMAIL", None):
+        print("SALES_EMAIL not configured, skipping pending payment notification.")
+        return
+
+    payment_label = {
+        "e_transfer": "E-Transfer Pending",
+        "on_account": "On Account / COD",
+    }.get(payment_method, payment_method)
+
+    items_html = "".join([
+        f"<tr>"
+        f"<td style='padding: 8px; border-bottom: 1px solid #e5e7eb;'>{item.get('sku') or item.get('product_id') or ''}</td>"
+        f"<td style='padding: 8px; border-bottom: 1px solid #e5e7eb;'>{item.get('name') or 'Item'}</td>"
+        f"<td style='padding: 8px; border-bottom: 1px solid #e5e7eb; text-align: right;'>{item.get('quantity', 1)}</td>"
+        f"<td style='padding: 8px; border-bottom: 1px solid #e5e7eb; text-align: right;'>${float(item.get('price') or 0):.2f}</td>"
+        f"</tr>"
+        for item in items
+    ])
+
+    html = f"""
+    <div style="font-family: Arial, sans-serif; max-width: 760px; margin: auto; color: #333;">
+        <h2 style="color: #111827;">New order awaiting payment</h2>
+        <p>A customer placed an order that was not paid online.</p>
+
+        <table style="width: 100%; border-collapse: collapse; margin: 16px 0;">
+            <tr><td style="padding: 6px 0;"><strong>Payment status:</strong></td><td>{payment_label}</td></tr>
+            <tr><td style="padding: 6px 0;"><strong>Spire / order ID:</strong></td><td>{order_id}</td></tr>
+            <tr><td style="padding: 6px 0;"><strong>Local order ID:</strong></td><td>{local_order_id}</td></tr>
+            <tr><td style="padding: 6px 0;"><strong>Customer:</strong></td><td>{customer_name} ({customer_email})</td></tr>
+            <tr><td style="padding: 6px 0;"><strong>Company:</strong></td><td>{customer_company or 'N/A'}</td></tr>
+            <tr><td style="padding: 6px 0;"><strong>PO number:</strong></td><td>{po_number or 'N/A'}</td></tr>
+            <tr><td style="padding: 6px 0;"><strong>Total:</strong></td><td>${total_amount:.2f}</td></tr>
+            <tr><td style="padding: 6px 0;"><strong>Shipping address:</strong></td><td>{shipping_address or 'N/A'}</td></tr>
+            <tr><td style="padding: 6px 0;"><strong>Billing address:</strong></td><td>{billing_address or 'Same as shipping / N/A'}</td></tr>
+        </table>
+
+        <h3 style="border-bottom: 1px solid #ccc; padding-bottom: 5px;">Items</h3>
+        <table style="width: 100%; border-collapse: collapse;">
+            <thead>
+                <tr>
+                    <th style="padding: 8px; text-align: left; border-bottom: 1px solid #d1d5db;">SKU</th>
+                    <th style="padding: 8px; text-align: left; border-bottom: 1px solid #d1d5db;">Product</th>
+                    <th style="padding: 8px; text-align: right; border-bottom: 1px solid #d1d5db;">Qty</th>
+                    <th style="padding: 8px; text-align: right; border-bottom: 1px solid #d1d5db;">Price</th>
+                </tr>
+            </thead>
+            <tbody>{items_html}</tbody>
+        </table>
+
+        {f"<h3>Order notes</h3><p>{order_notes}</p>" if order_notes else ""}
+    </div>
+    """
+
+    await send_email_via_graph(
+        subject=f"Order awaiting payment - {payment_label} - #{order_id}",
+        recipients=[settings.SALES_EMAIL],
+        html_content=html
+    )
+
 async def send_newsletter_notification_email(subscriber_email: str):
     html = f"""
     <div style="font-family: Arial, sans-serif; color: #333;">
