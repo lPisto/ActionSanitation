@@ -44,7 +44,7 @@ def health_check():
 @app.get("/")
 def read_root():
     # Devolver JSON para evitar que Apache en cPanel tire 400 por redirección relativa
-    return {"message": "Welcome to Action Sanitation API", "status": "online", "docs_url": "/actionsanitation/docs"}
+    return {"message": "Welcome to Action Sanitation API", "status": "online"}
 
 if __name__ == "__main__":
     uvicorn.run("main:app", host="0.0.0.0", port=8000, reload=True)
