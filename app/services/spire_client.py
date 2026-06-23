@@ -217,11 +217,26 @@ class SpireClient:
         )
         return self._parse_bool(self._lookup_named_value(customer or {}, field_names))
 
+    def customer_ship_code(self, customer: dict) -> str:
+        value = self._lookup_named_value(
+            customer or {},
+            ["shipCode", "ship_code", "shippingCode", "shipping_code"],
+        )
+        if isinstance(value, dict):
+            value = value.get("code") or value.get("id") or value.get("name")
+        return str(value or "").strip().upper()
+
     async def get_customer_free_delivery(self, customer_no: str) -> bool:
         if not customer_no:
             return False
         customer = await self.get_customer(customer_no)
         return self.customer_has_free_delivery(customer)
+
+    async def get_customer_ship_code(self, customer_no: str) -> str:
+        if not customer_no:
+            return ""
+        customer = await self.get_customer(customer_no)
+        return self.customer_ship_code(customer)
 
     def internal_customer_id_payload(self, internal_customer_id: str) -> dict:
         field_name = os.getenv("SPIRE_INTERNAL_CUSTOMER_ID_FIELD", "").strip()
@@ -288,6 +303,9 @@ class SpireClient:
         
     async def create_sales_order(self, order_data: dict):
         return await self._request("POST", "sales/orders/", json=order_data)
+
+    async def create_sales_order_note(self, order_id: str, note_data: dict):
+        return await self._request("POST", f"sales/orders/{order_id}/notes/", json=note_data)
         
     async def get_customer_orders(self, customer_no: str):
         # Alternativa: Usamos el buscador global "q" para evitar los errores 500 del parámetro "filter"

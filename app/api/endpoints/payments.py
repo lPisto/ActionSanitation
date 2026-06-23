@@ -80,15 +80,22 @@ async def update_local_order_status_by_candidates(candidates: list, new_status: 
     )
 
 async def user_has_free_delivery(current_user: Optional[UserInDB]) -> bool:
+    shipping_settings = await get_customer_shipping_settings(current_user)
+    return shipping_settings["free_delivery"]
+
+async def get_customer_shipping_settings(current_user: Optional[UserInDB]) -> dict:
     if not current_user:
-        return False
-    if getattr(current_user, "free_delivery", False):
-        return True
+        return {"free_delivery": False, "ship_code": ""}
+
+    free_delivery = bool(getattr(current_user, "free_delivery", False))
+    ship_code = ""
     try:
-        return await spire_client.get_customer_free_delivery(current_user.spire_customer_no)
+        customer = await spire_client.get_customer(current_user.spire_customer_no)
+        free_delivery = free_delivery or spire_client.customer_has_free_delivery(customer)
+        ship_code = spire_client.customer_ship_code(customer)
     except Exception as e:
-        print(f"Could not check free delivery flag for {current_user.spire_customer_no}: {e}")
-        return False
+        print(f"Could not check shipping settings for {current_user.spire_customer_no}: {e}")
+    return {"free_delivery": free_delivery, "ship_code": ship_code}
 
 @router.post("/create-payment-intent")
 async def create_payment_intent(
@@ -109,12 +116,14 @@ async def create_payment_intent(
         }
         local_order_id = request.order_id or f"web_{uuid4().hex[:12]}"
         subtotal = items_total(request.items or [])
-        free_delivery = await user_has_free_delivery(current_user)
+        shipping_settings = await get_customer_shipping_settings(current_user)
+        free_delivery = shipping_settings["free_delivery"]
         shipping_breakdown = calculate_shipping_breakdown(
             subtotal,
             request.items or [],
             request.shipping_method,
             free_delivery=free_delivery,
+            ship_code=shipping_settings["ship_code"],
         )
         shipping_cost = shipping_breakdown["shipping_cost"]
         tax_amount = round_money(request.tax_amount)

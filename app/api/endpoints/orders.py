@@ -16,7 +16,6 @@ import httpx
 import xml.etree.ElementTree as ET
 
 router = APIRouter()
-SPIRE_WEB_SALESPERSON = os.getenv("SPIRE_WEB_SALESPERSON", "").strip()
 COD_PAYMENT_METHODS = {"on_account", "cod", "cash_on_delivery"}
 DIRECT_ORDER_PAYMENT_METHODS = COD_PAYMENT_METHODS | {"e_transfer"}
 
@@ -217,15 +216,22 @@ def spire_order_notes(customer_notes: str, payment_method: str) -> str:
     return " | ".join(pieces)[:250]
 
 async def user_has_free_delivery(current_user: Optional[UserInDB]) -> bool:
+    shipping_settings = await get_customer_shipping_settings(current_user)
+    return shipping_settings["free_delivery"]
+
+async def get_customer_shipping_settings(current_user: Optional[UserInDB]) -> dict:
     if not current_user:
-        return False
-    if getattr(current_user, "free_delivery", False):
-        return True
+        return {"free_delivery": False, "ship_code": ""}
+
+    free_delivery = bool(getattr(current_user, "free_delivery", False))
+    ship_code = ""
     try:
-        return await spire_client.get_customer_free_delivery(current_user.spire_customer_no)
+        customer = await spire_client.get_customer(current_user.spire_customer_no)
+        free_delivery = free_delivery or spire_client.customer_has_free_delivery(customer)
+        ship_code = spire_client.customer_ship_code(customer)
     except Exception as e:
-        print(f"Could not check free delivery flag for {current_user.spire_customer_no}: {e}")
-        return False
+        print(f"Could not check shipping settings for {current_user.spire_customer_no}: {e}")
+    return {"free_delivery": free_delivery, "ship_code": ship_code}
 
 def valid_order_identifier(*values) -> Optional[str]:
     invalid = {"", "PENDING", "UNKNOWN", "NONE", "NULL"}
@@ -245,16 +251,13 @@ def spire_fallback_payload(
     allowed_keys = [
         "customer",
         "status",
-        "salesperson",
         "customerPO",
-        "memo",
         "items",
         "shippingAddress",
+        "billingAddress",
         "referenceNo",
         "shippingCarrier",
     ]
-    if include_note_aliases:
-        allowed_keys.extend(["comments", "comment", "notes", "note"])
     fallback = {key: order_data[key] for key in allowed_keys if key in order_data}
     if include_freight and "freightAmount" in order_data:
         fallback["freightAmount"] = order_data["freightAmount"]
@@ -270,16 +273,55 @@ async def create_spire_order_with_fallback(order_data: dict) -> dict:
     try:
         return await spire_client.create_sales_order(fallback)
     except HTTPException as second_error:
-        print(f"Spire fallback order payload failed, retrying with memo only: {second_error.detail}")
+        print(f"Spire fallback order payload failed, retrying with minimal order payload: {second_error.detail}")
 
-    memo_only_fallback = spire_fallback_payload(order_data, include_freight=True, include_note_aliases=False)
+    minimal_fallback = spire_fallback_payload(order_data, include_freight=True, include_note_aliases=False)
     try:
-        return await spire_client.create_sales_order(memo_only_fallback)
+        return await spire_client.create_sales_order(minimal_fallback)
     except HTTPException as third_error:
-        print(f"Spire memo-only fallback failed, retrying without freightAmount: {third_error.detail}")
+        print(f"Spire minimal order payload failed, retrying without freightAmount: {third_error.detail}")
 
     fallback_without_freight = spire_fallback_payload(order_data, include_freight=False, include_note_aliases=False)
     return await spire_client.create_sales_order(fallback_without_freight)
+
+def spire_note_subject(payment_method: str) -> str:
+    if payment_method in COD_PAYMENT_METHODS:
+        return "Payment Due on Delivery"
+    if payment_method == "e_transfer":
+        return "E-Transfer Pending"
+    return "Website Order Notes"
+
+async def create_spire_order_note_safe(order_id: Optional[str], note_body: str, payment_method: str):
+    order_id = valid_order_identifier(order_id)
+    note_body = (note_body or "").strip()
+    if not order_id or not note_body:
+        return
+
+    subject = spire_note_subject(payment_method)
+    alert = payment_method in DIRECT_ORDER_PAYMENT_METHODS
+    payload = {
+        "groupType": "salesOrder",
+        "subject": subject[:60],
+        "type": "Note",
+        "body": note_body[:4000],
+        "print": True,
+        "alert": alert,
+    }
+    try:
+        await spire_client.create_sales_order_note(order_id, payload)
+        return
+    except HTTPException as first_error:
+        print(f"Spire order note payload failed, retrying minimal note: {first_error.detail}")
+
+    try:
+        await spire_client.create_sales_order_note(order_id, {
+            "subject": subject[:60],
+            "body": note_body[:4000],
+            "print": True,
+            "alert": alert,
+        })
+    except Exception as e:
+        print(f"Could not create Spire order note for order {order_id}: {e}")
 
 async def notify_staff_pending_payment_order(
     current_user: UserInDB,
@@ -386,8 +428,8 @@ class ShippingRequest(BaseModel):
     items: List[ShippingItem]
     subtotal: float
 
-def calculate_shipping_cost_response(req: ShippingRequest, free_delivery: bool = False) -> dict:
-    return calculate_shipping_breakdown(req.subtotal, req.items, free_delivery=free_delivery)
+def calculate_shipping_cost_response(req: ShippingRequest, free_delivery: bool = False, ship_code: str = "") -> dict:
+    return calculate_shipping_breakdown(req.subtotal, req.items, free_delivery=free_delivery, ship_code=ship_code)
 
 def get_product_weight(product_id: str) -> float:
     try:
@@ -408,7 +450,12 @@ async def calculate_shipping(
 ):
     # Regla de negocio estricta: < 250 -> $20 fijo, >= 250 -> $0 (Gratis)
     # Esto tiene prioridad sobre cualquier cotización de transportista externa.
-    return calculate_shipping_cost_response(req, free_delivery=await user_has_free_delivery(current_user))
+    shipping_settings = await get_customer_shipping_settings(current_user)
+    return calculate_shipping_cost_response(
+        req,
+        free_delivery=shipping_settings["free_delivery"],
+        ship_code=shipping_settings["ship_code"],
+    )
 
     total_weight = 0.0
     for item in req.items:
@@ -472,7 +519,12 @@ async def calculate_shipping(
         print(f"Canada Post API Error: {e}")
     
     # Aplicar regla de negocio: < 250 -> 20, >= 250 -> Gratis
-    return calculate_shipping_cost_response(req, free_delivery=await user_has_free_delivery(current_user))
+    shipping_settings = await get_customer_shipping_settings(current_user)
+    return calculate_shipping_cost_response(
+        req,
+        free_delivery=shipping_settings["free_delivery"],
+        ship_code=shipping_settings["ship_code"],
+    )
 
 @router.post("/", response_model=OrderResponse)
 async def create_order(order: OrderCreate, current_user: UserInDB = Depends(get_current_user)):
@@ -508,7 +560,8 @@ async def create_order(order: OrderCreate, current_user: UserInDB = Depends(get_
     if not source_items:
         raise HTTPException(status_code=400, detail="No items found for this order.")
 
-    free_delivery = await user_has_free_delivery(current_user)
+    shipping_settings = await get_customer_shipping_settings(current_user)
+    free_delivery = shipping_settings["free_delivery"]
     money = resolve_order_money(order, existing_order, source_items)
     shipping_cost = money["shipping_cost"]
     tax_amount = money["tax_amount"]
@@ -517,6 +570,7 @@ async def create_order(order: OrderCreate, current_user: UserInDB = Depends(get_
         source_items,
         order.shipping_method,
         free_delivery=free_delivery,
+        ship_code=shipping_settings["ship_code"],
     )
     required_shipping_cost = round_money(shipping_breakdown["shipping_cost"])
     if free_delivery or str(order.shipping_method or "").lower() == "pickup":
@@ -687,11 +741,6 @@ async def create_order(order: OrderCreate, current_user: UserInDB = Depends(get_
         },
         "status": "O",
         "customerPO": po_number[:30] if po_number else "",
-        "memo": spire_notes,
-        "comments": spire_notes,
-        "comment": spire_notes,
-        "notes": spire_notes,
-        "note": spire_notes,
         "items": spire_items,
         "shippingAddress": shipping_spire_address,
         "billingAddress": billing_spire_address,
@@ -699,8 +748,6 @@ async def create_order(order: OrderCreate, current_user: UserInDB = Depends(get_
         "shippingCarrier": order.shipping_method[:15] if order.shipping_method else "",
         "freightAmount": shipping_cost,
     }
-    if SPIRE_WEB_SALESPERSON:
-        spire_order["salesperson"] = SPIRE_WEB_SALESPERSON
 
     if existing_order and existing_order.get("items"):
         saved_items = existing_order.get("items")
@@ -721,6 +768,7 @@ async def create_order(order: OrderCreate, current_user: UserInDB = Depends(get_
     # 3. Send to Spire with explicit error handling for the frontend
     try:
         spire_response = await create_spire_order_with_fallback(spire_order)
+        spire_order_id = valid_order_identifier(spire_response.get("id"), spire_response.get("orderId"))
         spire_order_no = spire_response.get("orderNo") or spire_response.get("id") or "UNKNOWN"
         if spire_order_no == "UNKNOWN":
             print(f"Warning: Spire response missing orderNo. Response: {spire_response}")
@@ -729,8 +777,10 @@ async def create_order(order: OrderCreate, current_user: UserInDB = Depends(get_
             customer_orders = await spire_client.get_customer_orders(current_user.spire_customer_no)
             for rec in customer_orders.get("records", []):
                 if rec.get("referenceNo") in (spire_reference_no, reference_no):
+                    spire_order_id = valid_order_identifier(rec.get("id"), spire_order_id)
                     spire_order_no = str(rec.get("orderNo") or rec.get("id") or "UNKNOWN")
                     break
+        await create_spire_order_note_safe(spire_order_id or spire_order_no, spire_notes, order.payment_method)
     except HTTPException as e:
         # Registra el error detallado en la consola del backend
         print(f"Spire ERP Error details: {e.detail}")
