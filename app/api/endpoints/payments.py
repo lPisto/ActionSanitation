@@ -35,6 +35,7 @@ class PaymentIntentRequest(BaseModel):
     billing_address_details: Optional[dict] = None
     po_number: Optional[str] = None
     order_notes: Optional[str] = None
+    free_tshirt_size: Optional[str] = None
     shipping_cost: Optional[float] = 0.0
     tax_amount: Optional[float] = 0.0
 
@@ -235,6 +236,7 @@ async def create_payment_intent(
             "billing_address_details": request.billing_address_details,
             "po_number": (request.po_number or "").strip() or None,
             "order_notes": (request.order_notes or "").strip() or None,
+            "free_tshirt_size": (request.free_tshirt_size or "").strip() or None,
             "shipping_cost": shipping_cost,
             "tax_amount": tax_amount,
             "status": "Payment Pending",

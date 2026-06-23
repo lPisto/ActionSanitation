@@ -33,6 +33,7 @@ class OrderCreate(BaseModel):
     payment_session_id: Optional[str] = None
     po_number: Optional[str] = None
     order_notes: Optional[str] = None
+    free_tshirt_size: Optional[str] = None
     shipping_cost: Optional[float] = 0.0
     tax_amount: Optional[float] = 0.0
     total_amount: Optional[float] = None

@@ -92,7 +92,15 @@ async def send_contact_email(name: str, email: str, subject: str, message: str):
         html_content=html
     )
 
-async def send_order_confirmation_email(to_email: str, name: str, order_id: str, items: list, total_amount: float, shipping_address: str):
+async def send_order_confirmation_email(
+    to_email: str,
+    name: str,
+    order_id: str,
+    items: list,
+    total_amount: float,
+    shipping_address: str,
+    promo_note: str = "",
+):
     items_html = "".join([
         f"<li><strong>{item.get('name', 'Item')}</strong> (SKU: {item.get('sku', '')})<br>"
         f"Qty: {item.get('quantity', 1)} | Price: ${float(item.get('price', 0)):.2f}</li>"
@@ -108,6 +116,7 @@ async def send_order_confirmation_email(to_email: str, name: str, order_id: str,
         <ul>
             {items_html}
         </ul>
+        {f"<p style='background:#ecfdf5; border:1px solid #bbf7d0; padding:12px; border-radius:8px;'><strong>{promo_note}</strong></p>" if promo_note else ""}
         <p><strong>Total Amount (incl. shipping & taxes):</strong> ${total_amount:.2f}</p>
         <p><strong>Shipping Address:</strong> {shipping_address}</p>
         

@@ -221,6 +221,108 @@ def spire_order_notes(customer_notes: str, payment_method: str) -> str:
         pieces.append(f"Customer notes: {customer_notes}")
     return " | ".join(pieces)[:250]
 
+FREE_TSHIRT_DEFAULT_SIZES = ["S", "M", "L", "XL", "2XL"]
+PROMO_ORDER_STATUSES_NOT_COUNTED = {"Payment Pending", "Payment Failed", "Cancelled", "Canceled"}
+
+def free_tshirt_promo_enabled() -> bool:
+    value = os.getenv("FREE_TSHIRT_PROMO_ENABLED", "true").strip().lower()
+    return value not in {"0", "false", "no", "off"}
+
+def free_tshirt_size_options() -> List[str]:
+    raw = os.getenv("FREE_TSHIRT_SIZE_OPTIONS", "").strip()
+    if not raw:
+        return FREE_TSHIRT_DEFAULT_SIZES
+    sizes = [part.strip().upper() for part in raw.split(",") if part.strip()]
+    return sizes or FREE_TSHIRT_DEFAULT_SIZES
+
+def free_tshirt_sku_map() -> Dict[str, str]:
+    raw = os.getenv("FREE_TSHIRT_SKUS", "").strip()
+    if not raw:
+        return {}
+
+    parsed: Dict[str, str] = {}
+    try:
+        data = json.loads(raw)
+        if isinstance(data, dict):
+            parsed = {str(size).strip().upper(): str(sku).strip() for size, sku in data.items() if str(sku).strip()}
+    except json.JSONDecodeError:
+        for pair in raw.split(","):
+            if ":" not in pair:
+                continue
+            size, sku = pair.split(":", 1)
+            size = size.strip().upper()
+            sku = sku.strip()
+            if size and sku:
+                parsed[size] = sku
+
+    return parsed
+
+def free_tshirt_available_sizes() -> List[str]:
+    configured_sizes = list(free_tshirt_sku_map().keys())
+    return configured_sizes or free_tshirt_size_options()
+
+def normalize_free_tshirt_size(size: Optional[str]) -> Optional[str]:
+    normalized = (size or "").strip().upper()
+    if not normalized:
+        return None
+    if normalized in free_tshirt_available_sizes():
+        return normalized
+    return None
+
+def free_tshirt_part_no_for_size(size: str) -> Optional[str]:
+    return free_tshirt_sku_map().get(size)
+
+def is_free_tshirt_part_no(part_no: Optional[str]) -> bool:
+    normalized = (part_no or "").strip()
+    if not normalized:
+        return False
+    return normalized in set(free_tshirt_sku_map().values())
+
+def build_free_tshirt_order_item(size: str, sku: str) -> dict:
+    return {
+        "product_id": sku,
+        "quantity": 1,
+        "price": 0.0,
+        "name": f"Free Action T-Shirt - {size}",
+        "sku": sku,
+        "image": None,
+        "is_dangerous_good": False,
+        "is_free_tshirt": True,
+        "free_tshirt_size": size,
+    }
+
+async def customer_has_prior_web_order(
+    db,
+    current_user: UserInDB,
+    exclude_values: Optional[List[str]] = None,
+) -> bool:
+    exclude_values = [str(value) for value in (exclude_values or []) if value]
+    query: Dict[str, Any] = {
+        "customer_email": current_user.email,
+        "status": {"$nin": list(PROMO_ORDER_STATUSES_NOT_COUNTED)},
+    }
+
+    if exclude_values:
+        query["$nor"] = [
+            {"id": {"$in": exclude_values}},
+            {"local_order_id": {"$in": exclude_values}},
+            {"payment_session_id": {"$in": exclude_values}},
+            {"converge_txn_id": {"$in": exclude_values}},
+            {"elavon_order_id": {"$in": exclude_values}},
+        ]
+
+    existing = await db["orders"].find_one(query, {"_id": 1})
+    return existing is not None
+
+async def customer_can_claim_free_tshirt(
+    db,
+    current_user: UserInDB,
+    exclude_values: Optional[List[str]] = None,
+) -> bool:
+    if not free_tshirt_promo_enabled():
+        return False
+    return not await customer_has_prior_web_order(db, current_user, exclude_values)
+
 async def user_has_free_delivery(current_user: Optional[UserInDB]) -> bool:
     shipping_settings = await get_customer_shipping_settings(current_user)
     return shipping_settings["free_delivery"]
@@ -531,6 +633,23 @@ async def calculate_shipping(
         ship_code=shipping_settings["ship_code"],
     )
 
+@router.get("/promotions/free-tshirt")
+async def get_free_tshirt_promotion(current_user: Optional[UserInDB] = Depends(get_optional_current_user)):
+    sizes = free_tshirt_available_sizes()
+    eligible = False
+    if current_user:
+        db = require_database()
+        eligible = await customer_can_claim_free_tshirt(db, current_user)
+
+    return {
+        "enabled": free_tshirt_promo_enabled(),
+        "eligible": eligible,
+        "configured": bool(free_tshirt_sku_map()),
+        "sizes": sizes,
+        "title": "Free T-shirt with your first web order",
+        "message": "Choose your size at checkout. One free T-shirt per customer on their first website order.",
+    }
+
 @router.post("/", response_model=OrderResponse)
 async def create_order(order: OrderCreate, current_user: UserInDB = Depends(get_current_user)):
     total_amount = 0.0
@@ -656,6 +775,59 @@ async def create_order(order: OrderCreate, current_user: UserInDB = Depends(get_
             return item.get(field, default)
         return getattr(item, field, default)
 
+    promo_exclude_values = [
+        local_order_id,
+        order.local_order_id,
+        order.payment_session_id,
+        order.stripe_payment_intent_id,
+        (existing_order or {}).get("id"),
+        (existing_order or {}).get("local_order_id"),
+        (existing_order or {}).get("payment_session_id"),
+        (existing_order or {}).get("converge_txn_id"),
+        (existing_order or {}).get("elavon_order_id"),
+    ]
+    requested_free_tshirt_size = (
+        order.free_tshirt_size
+        or (existing_order or {}).get("free_tshirt_size")
+        or ""
+    )
+    free_tshirt_size = normalize_free_tshirt_size(requested_free_tshirt_size)
+    existing_free_tshirt_line = next(
+        (
+            item for item in source_items
+            if item_field(item, "is_free_tshirt", False)
+            or is_free_tshirt_part_no(item_field(item, "sku") or item_field(item, "product_id"))
+        ),
+        None,
+    )
+    free_tshirt_item = None
+    free_tshirt_sku = (existing_order or {}).get("free_tshirt_sku")
+    free_tshirt_claimed = bool((existing_order or {}).get("free_tshirt_claimed") or existing_free_tshirt_line)
+    promo_note = ""
+
+    if existing_free_tshirt_line:
+        free_tshirt_size = free_tshirt_size or item_field(existing_free_tshirt_line, "free_tshirt_size")
+        free_tshirt_sku = free_tshirt_sku or item_field(existing_free_tshirt_line, "sku") or item_field(existing_free_tshirt_line, "product_id")
+        if free_tshirt_size:
+            promo_note = f"Free T-shirt included. Size: {free_tshirt_size}."
+    elif free_tshirt_size and not free_tshirt_claimed:
+        if await customer_can_claim_free_tshirt(db, current_user, promo_exclude_values):
+            free_tshirt_claimed = True
+            free_tshirt_sku = free_tshirt_part_no_for_size(free_tshirt_size)
+            promo_note = f"Free T-shirt requested for first web order. Size: {free_tshirt_size}."
+            if free_tshirt_sku:
+                free_tshirt_item = build_free_tshirt_order_item(free_tshirt_size, free_tshirt_sku)
+                promo_note = f"Free T-shirt included. Size: {free_tshirt_size}."
+            else:
+                print(
+                    "Free T-shirt requested but FREE_TSHIRT_SKUS has no SKU "
+                    f"for size {free_tshirt_size}."
+                )
+
+    source_items_for_order = list(source_items)
+    if free_tshirt_item:
+        source_items_for_order.append(free_tshirt_item)
+
     if not existing_order:
         now = datetime.utcnow().isoformat()
         initial_status = "ERP Pending"
@@ -673,8 +845,10 @@ async def create_order(order: OrderCreate, current_user: UserInDB = Depends(get_
                 "sku": item_field(item, "sku") or item_field(item, "product_id"),
                 "image": item_field(item, "image"),
                 "is_dangerous_good": item_field(item, "is_dangerous_good", False),
+                "is_free_tshirt": item_field(item, "is_free_tshirt", False),
+                "free_tshirt_size": item_field(item, "free_tshirt_size"),
             }
-            for item in source_items
+            for item in source_items_for_order
         ]
         await db["orders"].update_one(
             {"id": local_order_id},
@@ -694,6 +868,9 @@ async def create_order(order: OrderCreate, current_user: UserInDB = Depends(get_
                     "po_number": po_number,
                     "order_notes": order_notes,
                     "items": initial_items,
+                    "free_tshirt_size": free_tshirt_size,
+                    "free_tshirt_sku": free_tshirt_sku,
+                    "free_tshirt_claimed": free_tshirt_claimed,
                     "converge_txn_id": order.stripe_payment_intent_id,
                     "payment_session_id": order.payment_session_id,
                     "status": initial_status,
@@ -724,7 +901,7 @@ async def create_order(order: OrderCreate, current_user: UserInDB = Depends(get_
             "description": str(item_field(item, "name", ""))[:40],
             "orderQty": item_field(item, "quantity", 1),
             "unitPrice": str(item_field(item, "price", 0))
-        } for item in source_items
+        } for item in source_items_for_order
     ]
 
     freight_part_no = os.getenv("SPIRE_FREIGHT_PART_NO", "").strip()
@@ -738,6 +915,9 @@ async def create_order(order: OrderCreate, current_user: UserInDB = Depends(get_
 
     spire_reference_no = f"WEB-{reference_no}"[:20] if not str(reference_no).upper().startswith("WEB") else reference_no
     spire_notes = spire_order_notes(order_notes or "", order.payment_method)
+    if promo_note:
+        spire_notes = " | ".join([note for note in (spire_notes, promo_note) if note])[:250]
+    staff_order_notes = " | ".join([note for note in (order_notes, promo_note) if note])[:500]
 
     # 2. Map to Spire Order format according to the API schema
     spire_order = {
@@ -754,7 +934,7 @@ async def create_order(order: OrderCreate, current_user: UserInDB = Depends(get_
         "freightAmount": shipping_cost,
     }
 
-    if existing_order and existing_order.get("items"):
+    if existing_order and existing_order.get("items") and not free_tshirt_item:
         saved_items = existing_order.get("items")
     else:
         saved_items = [
@@ -765,9 +945,11 @@ async def create_order(order: OrderCreate, current_user: UserInDB = Depends(get_
                 "name": item_field(item, "name", ""),
                 "sku": item_field(item, "sku") or item_field(item, "product_id"),
                 "image": item_field(item, "image"),
-                "is_dangerous_good": item_field(item, "is_dangerous_good", False)
+                "is_dangerous_good": item_field(item, "is_dangerous_good", False),
+                "is_free_tshirt": item_field(item, "is_free_tshirt", False),
+                "free_tshirt_size": item_field(item, "free_tshirt_size"),
             }
-            for item in source_items
+            for item in source_items_for_order
         ]
     
     # 3. Send to Spire with explicit error handling for the frontend
@@ -808,6 +990,9 @@ async def create_order(order: OrderCreate, current_user: UserInDB = Depends(get_
                     "po_number": po_number,
                     "order_notes": order_notes,
                     "items": saved_items,
+                    "free_tshirt_size": free_tshirt_size,
+                    "free_tshirt_sku": free_tshirt_sku,
+                    "free_tshirt_claimed": free_tshirt_claimed,
                     "status": "E-Transfer Pending",
                     "provider": "E-Transfer",
                     "erp_error_message": str(e.detail),
@@ -825,7 +1010,7 @@ async def create_order(order: OrderCreate, current_user: UserInDB = Depends(get_
                 shipping_address=shipping_address,
                 billing_address=fallback_billing_address or "",
                 po_number=po_number or "",
-                order_notes=order_notes or "",
+                order_notes=staff_order_notes or "",
             )
             return {
                 "order_id": local_order_id,
@@ -861,6 +1046,9 @@ async def create_order(order: OrderCreate, current_user: UserInDB = Depends(get_
             "po_number": po_number,
             "order_notes": order_notes,
             "items": saved_items,
+            "free_tshirt_size": free_tshirt_size,
+            "free_tshirt_sku": free_tshirt_sku,
+            "free_tshirt_claimed": free_tshirt_claimed,
             "converge_txn_id": order.stripe_payment_intent_id,
             "payment_session_id": order.payment_session_id or (existing_order or {}).get("payment_session_id"),
             "status": payment_status_for(order.payment_method),
@@ -881,7 +1069,7 @@ async def create_order(order: OrderCreate, current_user: UserInDB = Depends(get_
         shipping_address=shipping_address,
         billing_address=billing_address or "",
         po_number=po_number or "",
-        order_notes=order_notes or "",
+        order_notes=staff_order_notes or "",
     )
 
     # 6. Enviar email de confirmación
@@ -892,7 +1080,8 @@ async def create_order(order: OrderCreate, current_user: UserInDB = Depends(get_
             order_id=spire_order_no,
             items=saved_items,
             total_amount=total_amount,
-            shipping_address=shipping_address or "N/A"
+            shipping_address=shipping_address or "N/A",
+            promo_note=promo_note,
         )
     except Exception as e:
         print(f"Error sending order confirmation email: {e}")
@@ -1059,6 +1248,8 @@ async def get_order_product_history(request: Request, current_user: UserInDB = D
             part_no = valid_order_identifier(item.get("product_id"), item.get("sku"))
             if not part_no or (freight_part_no and part_no == freight_part_no):
                 continue
+            if item.get("is_free_tshirt") or is_free_tshirt_part_no(part_no):
+                continue
 
             existing = products_by_id.get(part_no)
             product_snapshot = {
@@ -1111,6 +1302,8 @@ async def repeat_purchase(order_id: str, request: Request, current_user: UserInD
                 part_no = item.get("product_id") or item.get("sku")
                 if not part_no:
                     continue
+                if item.get("is_free_tshirt") or is_free_tshirt_part_no(part_no):
+                    continue
                 name = item.get("name") or part_no
                 image = item.get("image")
                 is_dangerous_good = item.get("is_dangerous_good", False)
@@ -1151,6 +1344,8 @@ async def repeat_purchase(order_id: str, request: Request, current_user: UserInD
             # Buscamos el partNo en la raíz (o dentro de inventory por seguridad)
             part_no = item.get("partNo") or item.get("inventory", {}).get("partNo")
             if part_no:
+                if is_free_tshirt_part_no(part_no):
+                    continue
                 name = item.get("description") or part_no
                 image = None
                 is_dangerous_good = False
