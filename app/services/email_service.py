@@ -26,9 +26,6 @@ async def send_email_via_graph(subject: str, recipients: list, html_content: str
         print(f"Error obtaining Graph token: {e}")
         return
 
-    # Endpoint to send email from the specific mailbox defined in MAIL_FROM
-    send_mail_url = f"https://graph.microsoft.com/v1.0/users/{settings.MAIL_FROM}/sendMail"
-    
     headers = {
         "Authorization": f"Bearer {token}",
         "Content-Type": "application/json"
@@ -47,16 +44,39 @@ async def send_email_via_graph(subject: str, recipients: list, html_content: str
         },
         "saveToSentItems": "true"
     }
-    
+
+    sender_candidates = []
+    for sender in (
+        getattr(settings, "MS_GRAPH_SENDER", ""),
+        getattr(settings, "MAIL_FROM", ""),
+        getattr(settings, "MAIL_USERNAME", ""),
+    ):
+        sender = str(sender or "").strip()
+        if sender and sender not in sender_candidates:
+            sender_candidates.append(sender)
+
+    if not sender_candidates:
+        print("No Graph sender mailbox configured, skipping email send.")
+        return
+
     async with httpx.AsyncClient() as client:
-        try:
-            response = await client.post(send_mail_url, headers=headers, json=email_msg)
-            response.raise_for_status()
-            print("Email sent successfully via MS Graph.")
-        except httpx.HTTPStatusError as e:
-            print(f"Failed to send email via MS Graph: {e.response.text}")
-        except Exception as e:
-            print(f"Error sending email via MS Graph: {e}")
+        for index, sender in enumerate(sender_candidates):
+            send_mail_url = f"https://graph.microsoft.com/v1.0/users/{sender}/sendMail"
+            try:
+                response = await client.post(send_mail_url, headers=headers, json=email_msg)
+                response.raise_for_status()
+                print(f"Email sent successfully via MS Graph from {sender}.")
+                return
+            except httpx.HTTPStatusError as e:
+                error_text = e.response.text
+                if index < len(sender_candidates) - 1 and "ErrorInvalidUser" in error_text:
+                    print(f"Graph sender {sender} is invalid, retrying next configured sender.")
+                    continue
+                print(f"Failed to send email via MS Graph: {error_text}")
+                return
+            except Exception as e:
+                print(f"Error sending email via MS Graph: {e}")
+                return
 
 async def send_contact_email(name: str, email: str, subject: str, message: str):
     html = f"""

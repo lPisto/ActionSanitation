@@ -178,6 +178,12 @@ def build_spire_address(
         "postalCode": postal_code[:10],
         "country": country,
         "email": email[:50],
+        "salesperson": {
+            "code": "WEB"
+        },
+        "territory": {
+            "code": "WEB"
+        }
     }
 
     if phone:
@@ -251,6 +257,7 @@ def spire_fallback_payload(
     allowed_keys = [
         "customer",
         "status",
+        "salesperson",
         "customerPO",
         "items",
         "shippingAddress",
@@ -300,9 +307,7 @@ async def create_spire_order_note_safe(order_id: Optional[str], note_body: str, 
     subject = spire_note_subject(payment_method)
     alert = payment_method in DIRECT_ORDER_PAYMENT_METHODS
     payload = {
-        "groupType": "salesOrder",
         "subject": subject[:60],
-        "type": "Note",
         "body": note_body[:4000],
         "print": True,
         "alert": alert,
