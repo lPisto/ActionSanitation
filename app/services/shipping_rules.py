@@ -40,6 +40,7 @@ def calculate_shipping_breakdown(
     subtotal: Any,
     items: list[Any],
     shipping_method: str | None = None,
+    free_delivery: bool = False,
 ) -> dict:
     if str(shipping_method or "").lower() == "pickup":
         return {
@@ -50,7 +51,7 @@ def calculate_shipping_breakdown(
         }
 
     subtotal_value = parse_float(subtotal)
-    base_shipping_cost = 0.0 if subtotal_value >= FREE_SHIPPING_SUBTOTAL else BASE_SHIPPING_COST
+    base_shipping_cost = 0.0 if free_delivery or subtotal_value >= FREE_SHIPPING_SUBTOTAL else BASE_SHIPPING_COST
     dangerous_goods = has_dangerous_goods(items)
     dangerous_goods_surcharge = DANGEROUS_GOODS_SHIPPING_SURCHARGE if dangerous_goods else 0.0
 

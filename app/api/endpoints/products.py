@@ -7,8 +7,10 @@ from app.core.config import settings
 from app.services.spire_client import spire_client
 from app.services.product_rules import (
     clean_dangerous_good_marker,
+    clean_text_encoding_artifacts,
     product_is_dangerous_good,
     product_upload_is_enabled,
+    text_has_encoding_artifacts,
 )
 from app.api.deps import get_current_user, get_optional_current_user, get_database
 from app.models.user import UserInDB
@@ -274,7 +276,7 @@ def normalize_product_data(record: dict, request: Request = None, customer_prici
 
     # --- Gestión de Descripciones ---
     # En Spire, 'description' es el Nombre/Título del producto.
-    raw_product_name = (record.get("description") or inv.get("description", "")).strip()
+    raw_product_name = clean_text_encoding_artifacts(record.get("description") or inv.get("description", ""))
     is_dangerous_good = product_is_dangerous_good(record, metadata)
     product_name = clean_dangerous_good_marker(raw_product_name)
     
@@ -284,12 +286,15 @@ def normalize_product_data(record: dict, request: Request = None, customer_prici
     record["description"] = product_name
     record["short_description"] = product_name
 
-    mongo_long = (metadata.get("description") or "").strip() if metadata else ""
-    spire_ext = (record.get("extendedDescription") or inv.get("extendedDescription") or "").strip()
+    raw_mongo_long = (metadata.get("description") or "") if metadata else ""
+    raw_spire_ext = record.get("extendedDescription") or inv.get("extendedDescription") or ""
+    mongo_long = clean_text_encoding_artifacts(raw_mongo_long)
+    spire_ext = clean_text_encoding_artifacts(raw_spire_ext)
     
-    # La descripción larga tiene prioridad: 1. Mongo, 2. Extended Spire.
+    # Keep Spire first so ERP long-description edits appear without waiting for Mongo metadata refresh.
+    # If Spire has legacy encoding artifacts and Mongo has a clean version, prefer Mongo for display.
     # Si es igual al nombre del producto, la dejamos vacía para evitar duplicidad visual.
-    long_desc = mongo_long or spire_ext
+    long_desc = mongo_long if text_has_encoding_artifacts(raw_spire_ext) and mongo_long else spire_ext or mongo_long
     record["long_description"] = long_desc if long_desc not in (product_name, raw_product_name) else ""
     record["frontend_categories"] = metadata.get("subcategories", []) if metadata else []
     record["sds_url"] = metadata.get("sds_url") if metadata else None

@@ -124,6 +124,8 @@ async def send_pending_payment_order_notification_email(
     payment_label = {
         "e_transfer": "E-Transfer Pending",
         "on_account": "On Account / COD",
+        "cod": "Cash on Delivery",
+        "cash_on_delivery": "Cash on Delivery",
     }.get(payment_method, payment_method)
 
     items_html = "".join([

@@ -9,6 +9,10 @@ router = APIRouter()
 
 @router.get("/me", response_model=UserInDB)
 async def read_users_me(current_user: UserInDB = Depends(get_current_user)):
+    try:
+        current_user.free_delivery = await spire_client.get_customer_free_delivery(current_user.spire_customer_no)
+    except Exception as e:
+        print(f"Could not refresh free delivery flag for {current_user.spire_customer_no}: {e}")
     return current_user
 
 @router.put("/me", response_model=UserInDB)

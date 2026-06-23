@@ -114,6 +114,8 @@ def summarize_user_record(record: dict) -> dict:
         "street_address": user.get("street_address"),
         "zip": user.get("zip"),
         "spire_customer_no": user.get("spire_customer_no"),
+        "internal_customer_id": user.get("internal_customer_id") or user.get("id"),
+        "free_delivery": bool(user.get("free_delivery", False)),
         "account_status": account_status,
         "approved": bool(approved),
         "spire_match_found": record.get("spire_match_found", False),
@@ -121,6 +123,27 @@ def summarize_user_record(record: dict) -> dict:
         "approved_at": record.get("approved_at"),
         "updated_at": record.get("updated_at"),
     }
+
+def internal_customer_id_for(user_record: dict, user_doc: dict) -> str:
+    return str(
+        user_doc.get("internal_customer_id")
+        or user_doc.get("id")
+        or user_record.get("_id")
+        or ""
+    )
+
+async def sync_spire_internal_customer_id(user_record: dict, user_doc: dict, spire_customer_no: str):
+    internal_customer_id = internal_customer_id_for(user_record, user_doc)
+    payload = spire_client.internal_customer_id_payload(internal_customer_id)
+    if not payload:
+        return None
+
+    try:
+        await spire_client.update_customer(spire_customer_no, payload)
+        return {"synced": True, "internal_customer_id": internal_customer_id}
+    except Exception as e:
+        print(f"Could not sync internal customer ID to Spire for {spire_customer_no}: {e}")
+        return {"synced": False, "internal_customer_id": internal_customer_id, "error": str(e)}
 
 @router.post("/register", response_model=UserInDB)
 async def register(user_in: UserCreate):
@@ -143,9 +166,11 @@ async def register(user_in: UserCreate):
 
     # 3. Save to local DB (MongoDB)
     user_count = await db["users"].count_documents({})
+    internal_customer_id = str(user_count + 1)
     user_db = UserInDB(
-        id=str(user_count + 1),
+        id=internal_customer_id,
         spire_customer_no=spire_customer_no,
+        internal_customer_id=internal_customer_id,
         email=user_in.email,
         first_name=user_in.first_name,
         last_name=user_in.last_name,
@@ -243,8 +268,11 @@ async def approve_account(req: AccountApprovalRequest, x_admin_token: Optional[s
         raise HTTPException(status_code=400, detail=f"Spire customer could not be verified: {e.detail}")
 
     user_doc["spire_customer_no"] = spire_customer_no
+    user_doc["internal_customer_id"] = internal_customer_id_for(user_record, user_doc)
     user_doc["account_status"] = "approved"
     user_doc["approved"] = True
+
+    internal_id_sync = await sync_spire_internal_customer_id(user_record, user_doc, spire_customer_no)
 
     await db["users"].update_one(
         {"email": req.email},
@@ -252,6 +280,7 @@ async def approve_account(req: AccountApprovalRequest, x_admin_token: Optional[s
             "user": user_doc,
             "account_status": "approved",
             "approved": True,
+            "spire_internal_customer_id_sync": internal_id_sync,
             "approved_at": datetime.utcnow().isoformat(),
             "updated_at": datetime.utcnow().isoformat()
         }}

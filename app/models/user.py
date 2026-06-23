@@ -40,6 +40,7 @@ class UserUpdate(BaseModel):
 class UserInDB(BaseModel):
     id: str
     spire_customer_no: str
+    internal_customer_id: Optional[str] = None
     email: str
     first_name: str
     last_name: str
@@ -57,6 +58,7 @@ class UserInDB(BaseModel):
     billing_country: Optional[str] = None
     account_status: str = "approved"
     approved: bool = True
+    free_delivery: Optional[bool] = False
 
 class Token(BaseModel):
     access_token: str

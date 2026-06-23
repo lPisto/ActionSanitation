@@ -1,11 +1,14 @@
 import httpx
-from fastapi import APIRouter, HTTPException, Request, Header
+from fastapi import APIRouter, Depends, HTTPException, Request, Header
 from pydantic import BaseModel
 from typing import Optional, List
 from datetime import datetime
 from uuid import uuid4
 from app.core.config import settings
 from app.db.mongodb import get_database
+from app.api.deps import get_optional_current_user
+from app.models.user import UserInDB
+from app.services.spire_client import spire_client
 from app.services.shipping_rules import calculate_shipping_breakdown, items_total, round_money
 
 router = APIRouter()
@@ -76,8 +79,22 @@ async def update_local_order_status_by_candidates(candidates: list, new_status: 
         {"$set": update_data}
     )
 
+async def user_has_free_delivery(current_user: Optional[UserInDB]) -> bool:
+    if not current_user:
+        return False
+    if getattr(current_user, "free_delivery", False):
+        return True
+    try:
+        return await spire_client.get_customer_free_delivery(current_user.spire_customer_no)
+    except Exception as e:
+        print(f"Could not check free delivery flag for {current_user.spire_customer_no}: {e}")
+        return False
+
 @router.post("/create-payment-intent")
-async def create_payment_intent(request: PaymentIntentRequest):
+async def create_payment_intent(
+    request: PaymentIntentRequest,
+    current_user: Optional[UserInDB] = Depends(get_optional_current_user),
+):
     try:
         base_url = settings.CONVERGE_URL.rstrip("/")
 
@@ -92,13 +109,21 @@ async def create_payment_intent(request: PaymentIntentRequest):
         }
         local_order_id = request.order_id or f"web_{uuid4().hex[:12]}"
         subtotal = items_total(request.items or [])
-        shipping_breakdown = calculate_shipping_breakdown(subtotal, request.items or [], request.shipping_method)
+        free_delivery = await user_has_free_delivery(current_user)
+        shipping_breakdown = calculate_shipping_breakdown(
+            subtotal,
+            request.items or [],
+            request.shipping_method,
+            free_delivery=free_delivery,
+        )
         shipping_cost = shipping_breakdown["shipping_cost"]
         tax_amount = round_money(request.tax_amount)
         amount = round_money(request.amount)
         if subtotal > 0:
             expected_amount = round_money(subtotal + shipping_cost + tax_amount)
-            if amount < expected_amount:
+            if free_delivery or str(request.shipping_method or "").lower() == "pickup":
+                amount = expected_amount
+            elif amount < expected_amount:
                 amount = expected_amount
 
         order_payload = {

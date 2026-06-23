@@ -4,7 +4,7 @@ from fastapi import APIRouter, Depends, HTTPException, Request
 from typing import Any, Dict, List, Optional
 from pydantic import BaseModel
 from app.services.spire_client import spire_client
-from app.api.deps import get_current_user
+from app.api.deps import get_current_user, get_optional_current_user
 from app.models.user import UserInDB
 from app.models.order import OrderCreate, OrderResponse
 from app.core.config import settings
@@ -16,8 +16,9 @@ import httpx
 import xml.etree.ElementTree as ET
 
 router = APIRouter()
-SPIRE_WEB_SALESPERSON = os.getenv("SPIRE_WEB_SALESPERSON", "00")
-DIRECT_ORDER_PAYMENT_METHODS = {"on_account", "e_transfer"}
+SPIRE_WEB_SALESPERSON = os.getenv("SPIRE_WEB_SALESPERSON", "").strip()
+COD_PAYMENT_METHODS = {"on_account", "cod", "cash_on_delivery"}
+DIRECT_ORDER_PAYMENT_METHODS = COD_PAYMENT_METHODS | {"e_transfer"}
 
 COUNTRY_CODES = {
     "canada": "CA",
@@ -186,18 +187,45 @@ def build_spire_address(
     return {key: value for key, value in address.items() if value}
 
 def payment_status_for(method: str) -> str:
-    if method == "on_account":
-        return "On Account"
+    if method in COD_PAYMENT_METHODS:
+        return "Payment Due on Delivery"
     if method == "e_transfer":
         return "E-Transfer Pending"
     return "Paid"
 
 def provider_for(method: str) -> str:
-    if method == "on_account":
-        return "On Account"
+    if method in COD_PAYMENT_METHODS:
+        return "Cash on Delivery"
     if method == "e_transfer":
         return "E-Transfer"
     return "Elavon"
+
+def payment_note_for(method: str) -> str:
+    if method in COD_PAYMENT_METHODS:
+        return "Payment due upon delivery."
+    if method == "e_transfer":
+        return "E-transfer payment pending."
+    return ""
+
+def spire_order_notes(customer_notes: str, payment_method: str) -> str:
+    pieces = []
+    payment_note = payment_note_for(payment_method)
+    if payment_note:
+        pieces.append(payment_note)
+    if customer_notes:
+        pieces.append(f"Customer notes: {customer_notes}")
+    return " | ".join(pieces)[:250]
+
+async def user_has_free_delivery(current_user: Optional[UserInDB]) -> bool:
+    if not current_user:
+        return False
+    if getattr(current_user, "free_delivery", False):
+        return True
+    try:
+        return await spire_client.get_customer_free_delivery(current_user.spire_customer_no)
+    except Exception as e:
+        print(f"Could not check free delivery flag for {current_user.spire_customer_no}: {e}")
+        return False
 
 def valid_order_identifier(*values) -> Optional[str]:
     invalid = {"", "PENDING", "UNKNOWN", "NONE", "NULL"}
@@ -209,7 +237,11 @@ def valid_order_identifier(*values) -> Optional[str]:
             return normalized
     return None
 
-def spire_fallback_payload(order_data: dict, include_freight: bool = True) -> dict:
+def spire_fallback_payload(
+    order_data: dict,
+    include_freight: bool = True,
+    include_note_aliases: bool = True,
+) -> dict:
     allowed_keys = [
         "customer",
         "status",
@@ -221,6 +253,8 @@ def spire_fallback_payload(order_data: dict, include_freight: bool = True) -> di
         "referenceNo",
         "shippingCarrier",
     ]
+    if include_note_aliases:
+        allowed_keys.extend(["comments", "comment", "notes", "note"])
     fallback = {key: order_data[key] for key in allowed_keys if key in order_data}
     if include_freight and "freightAmount" in order_data:
         fallback["freightAmount"] = order_data["freightAmount"]
@@ -232,13 +266,19 @@ async def create_spire_order_with_fallback(order_data: dict) -> dict:
     except HTTPException as first_error:
         print(f"Spire full order payload failed, retrying without optional fields: {first_error.detail}")
 
-    fallback = spire_fallback_payload(order_data, include_freight=True)
+    fallback = spire_fallback_payload(order_data, include_freight=True, include_note_aliases=True)
     try:
         return await spire_client.create_sales_order(fallback)
     except HTTPException as second_error:
-        print(f"Spire fallback order payload failed, retrying without freightAmount: {second_error.detail}")
+        print(f"Spire fallback order payload failed, retrying with memo only: {second_error.detail}")
 
-    fallback_without_freight = spire_fallback_payload(order_data, include_freight=False)
+    memo_only_fallback = spire_fallback_payload(order_data, include_freight=True, include_note_aliases=False)
+    try:
+        return await spire_client.create_sales_order(memo_only_fallback)
+    except HTTPException as third_error:
+        print(f"Spire memo-only fallback failed, retrying without freightAmount: {third_error.detail}")
+
+    fallback_without_freight = spire_fallback_payload(order_data, include_freight=False, include_note_aliases=False)
     return await spire_client.create_sales_order(fallback_without_freight)
 
 async def notify_staff_pending_payment_order(
@@ -346,8 +386,8 @@ class ShippingRequest(BaseModel):
     items: List[ShippingItem]
     subtotal: float
 
-def calculate_shipping_cost_response(req: ShippingRequest) -> dict:
-    return calculate_shipping_breakdown(req.subtotal, req.items)
+def calculate_shipping_cost_response(req: ShippingRequest, free_delivery: bool = False) -> dict:
+    return calculate_shipping_breakdown(req.subtotal, req.items, free_delivery=free_delivery)
 
 def get_product_weight(product_id: str) -> float:
     try:
@@ -362,10 +402,13 @@ def get_product_weight(product_id: str) -> float:
     return 0.0
 
 @router.post("/calculate-shipping")
-async def calculate_shipping(req: ShippingRequest):
+async def calculate_shipping(
+    req: ShippingRequest,
+    current_user: Optional[UserInDB] = Depends(get_optional_current_user),
+):
     # Regla de negocio estricta: < 250 -> $20 fijo, >= 250 -> $0 (Gratis)
     # Esto tiene prioridad sobre cualquier cotización de transportista externa.
-    return calculate_shipping_cost_response(req)
+    return calculate_shipping_cost_response(req, free_delivery=await user_has_free_delivery(current_user))
 
     total_weight = 0.0
     for item in req.items:
@@ -429,7 +472,7 @@ async def calculate_shipping(req: ShippingRequest):
         print(f"Canada Post API Error: {e}")
     
     # Aplicar regla de negocio: < 250 -> 20, >= 250 -> Gratis
-    return calculate_shipping_cost_response(req)
+    return calculate_shipping_cost_response(req, free_delivery=await user_has_free_delivery(current_user))
 
 @router.post("/", response_model=OrderResponse)
 async def create_order(order: OrderCreate, current_user: UserInDB = Depends(get_current_user)):
@@ -465,12 +508,21 @@ async def create_order(order: OrderCreate, current_user: UserInDB = Depends(get_
     if not source_items:
         raise HTTPException(status_code=400, detail="No items found for this order.")
 
+    free_delivery = await user_has_free_delivery(current_user)
     money = resolve_order_money(order, existing_order, source_items)
     shipping_cost = money["shipping_cost"]
     tax_amount = money["tax_amount"]
-    shipping_breakdown = calculate_shipping_breakdown(money["subtotal"], source_items, order.shipping_method)
+    shipping_breakdown = calculate_shipping_breakdown(
+        money["subtotal"],
+        source_items,
+        order.shipping_method,
+        free_delivery=free_delivery,
+    )
     required_shipping_cost = round_money(shipping_breakdown["shipping_cost"])
-    if shipping_cost < required_shipping_cost:
+    if free_delivery or str(order.shipping_method or "").lower() == "pickup":
+        shipping_cost = required_shipping_cost
+        money["shipping_cost"] = shipping_cost
+    elif shipping_cost < required_shipping_cost:
         shipping_cost = required_shipping_cost
         money["shipping_cost"] = shipping_cost
 
@@ -527,8 +579,8 @@ async def create_order(order: OrderCreate, current_user: UserInDB = Depends(get_
         or (existing_order or {}).get("id")
         or order.stripe_payment_intent_id
     )
-    if not local_order_id and order.payment_method == "on_account":
-        local_order_id = f"on_account_{datetime.utcnow().strftime('%Y%m%d%H%M%S%f')}"
+    if not local_order_id and order.payment_method in COD_PAYMENT_METHODS:
+        local_order_id = f"cod_{datetime.utcnow().strftime('%Y%m%d%H%M%S%f')}"
     if not local_order_id and order.payment_method == "e_transfer":
         local_order_id = f"e_transfer_{datetime.utcnow().strftime('%Y%m%d%H%M%S%f')}"
     po_number = (order.po_number or "").strip() or (existing_order or {}).get("po_number")
@@ -548,8 +600,8 @@ async def create_order(order: OrderCreate, current_user: UserInDB = Depends(get_
     if not existing_order:
         now = datetime.utcnow().isoformat()
         initial_status = "ERP Pending"
-        if order.payment_method == "on_account":
-            initial_status = "On Account Pending"
+        if order.payment_method in COD_PAYMENT_METHODS:
+            initial_status = "Payment Due on Delivery"
         elif order.payment_method == "e_transfer":
             initial_status = "E-Transfer Pending"
 
@@ -626,6 +678,7 @@ async def create_order(order: OrderCreate, current_user: UserInDB = Depends(get_
         })
 
     spire_reference_no = f"WEB-{reference_no}"[:20] if not str(reference_no).upper().startswith("WEB") else reference_no
+    spire_notes = spire_order_notes(order_notes or "", order.payment_method)
 
     # 2. Map to Spire Order format according to the API schema
     spire_order = {
@@ -633,11 +686,12 @@ async def create_order(order: OrderCreate, current_user: UserInDB = Depends(get_
             "customerNo": current_user.spire_customer_no
         },
         "status": "O",
-        "salesperson": SPIRE_WEB_SALESPERSON,
         "customerPO": po_number[:30] if po_number else "",
-        "memo": order_notes[:250] if order_notes else "",
-        "comments": order_notes[:250] if order_notes else "",
-        "notes": order_notes[:250] if order_notes else "",
+        "memo": spire_notes,
+        "comments": spire_notes,
+        "comment": spire_notes,
+        "notes": spire_notes,
+        "note": spire_notes,
         "items": spire_items,
         "shippingAddress": shipping_spire_address,
         "billingAddress": billing_spire_address,
@@ -645,6 +699,8 @@ async def create_order(order: OrderCreate, current_user: UserInDB = Depends(get_
         "shippingCarrier": order.shipping_method[:15] if order.shipping_method else "",
         "freightAmount": shipping_cost,
     }
+    if SPIRE_WEB_SALESPERSON:
+        spire_order["salesperson"] = SPIRE_WEB_SALESPERSON
 
     if existing_order and existing_order.get("items"):
         saved_items = existing_order.get("items")
@@ -935,6 +991,47 @@ async def get_order_history(request: Request, current_user: UserInDB = Depends(g
         
     formatted_orders.sort(key=lambda o: o.get("created_at") or o.get("orderDate") or "", reverse=True)
     return formatted_orders
+
+@router.get("/products")
+async def get_order_product_history(request: Request, current_user: UserInDB = Depends(get_current_user)):
+    orders = await get_order_history(request, current_user)
+    freight_part_no = os.getenv("SPIRE_FREIGHT_PART_NO", "").strip()
+    products_by_id: dict[str, dict] = {}
+
+    for order in orders:
+        ordered_at = order.get("created_at") or order.get("orderDate") or ""
+        for item in order.get("items") or []:
+            part_no = valid_order_identifier(item.get("product_id"), item.get("sku"))
+            if not part_no or (freight_part_no and part_no == freight_part_no):
+                continue
+
+            existing = products_by_id.get(part_no)
+            product_snapshot = {
+                "product_id": part_no,
+                "sku": item.get("sku") or part_no,
+                "name": item.get("name") or part_no,
+                "price": parse_float(item.get("price", item.get("unit_price", 0))),
+                "image": item.get("image"),
+                "is_dangerous_good": item.get("is_dangerous_good", False),
+                "last_ordered_at": ordered_at,
+            }
+
+            if not existing:
+                products_by_id[part_no] = product_snapshot
+                continue
+
+            if ordered_at and ordered_at > (existing.get("last_ordered_at") or ""):
+                existing["last_ordered_at"] = ordered_at
+            for key in ("name", "price", "image", "is_dangerous_good"):
+                if not existing.get(key) and product_snapshot.get(key):
+                    existing[key] = product_snapshot[key]
+
+    return {
+        "items": sorted(
+            products_by_id.values(),
+            key=lambda product: str(product.get("name") or product.get("sku") or "").lower(),
+        )
+    }
 
 @router.get("/{order_id}/invoice")
 async def view_invoice(order_id: str, current_user: UserInDB = Depends(get_current_user)):

@@ -350,3 +350,55 @@ Prefijo: `/api/stripe`.
     "status": "ok"
   }
   ```
+
+---
+
+## 9. Backups automaticos de MongoDB
+
+El backend incluye un script para guardar backups locales comprimidos del cluster de MongoDB usando `mongodump`.
+
+- Script: `scripts/mongodb_backup.py`
+- Carpeta local por defecto: `backups/mongodb/`
+- Horarios recomendados: `00:00` y `20:00`, hora local de la maquina
+- Retencion por defecto: conserva solo el ultimo backup exitoso
+- Logs: `backups/mongodb/mongodb_backup.log`
+
+El script carga `MONGODB_URL` desde `.env`. Para respaldar todo el cluster, si `MONGODB_URL` incluye una base en el path, el script remueve ese path antes de ejecutar `mongodump`. Si se necesita una URI especial para backups, configurar:
+
+```env
+MONGODB_BACKUP_URI=mongodb+srv://user:password@cluster.example.mongodb.net/?retryWrites=true&w=majority
+MONGODB_BACKUP_DIR=backups/mongodb
+MONGODUMP_PATH=mongodump
+```
+
+Probar sin crear archivo:
+
+```powershell
+python scripts\mongodb_backup.py --dry-run
+```
+
+Crear un backup manual:
+
+```powershell
+python scripts\mongodb_backup.py
+```
+
+Instalar la tarea programada en Windows para las `00:00` y `20:00`:
+
+```powershell
+Set-Location Backend
+powershell -ExecutionPolicy Bypass -File .\scripts\install_mongodb_backup_task.ps1
+```
+
+En Linux/cPanel, crear un cron equivalente:
+
+```cron
+0 0,20 * * * cd /home/nhanceco/action/repository/Backend && /usr/bin/python3 scripts/mongodb_backup.py >> backups/mongodb/cron.log 2>&1
+```
+
+Para restaurar un backup:
+
+```powershell
+Expand-Archive -Path "backups\mongodb\mongodb_cluster_YYYYMMDD_HHMMSS.zip" -DestinationPath "backups\mongodb\restore"
+mongorestore --uri="<MONGODB_URL>" --archive="backups\mongodb\restore\mongodb_cluster_YYYYMMDD_HHMMSS.archive"
+```

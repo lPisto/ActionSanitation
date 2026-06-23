@@ -3,6 +3,7 @@ from fastapi import HTTPException
 from app.core.config import settings
 import base64
 import json
+import os
 import re
 
 class SpireClient:
@@ -133,6 +134,102 @@ class SpireClient:
             if self._record_matches_email(record, normalized_email):
                 return record
         return None
+
+    @staticmethod
+    def _parse_bool(value) -> bool:
+        if isinstance(value, bool):
+            return value
+        if isinstance(value, (int, float)):
+            return value != 0
+        normalized = str(value or "").strip().lower()
+        return normalized in {"1", "true", "yes", "y", "on", "free"}
+
+    @staticmethod
+    def _field_names_from_env(env_name: str, defaults: list[str]) -> list[str]:
+        raw = os.getenv(env_name, "")
+        values = [part.strip() for part in raw.split(",") if part.strip()]
+        return values or defaults
+
+    @classmethod
+    def _lookup_named_value(cls, data, names: list[str]):
+        target_names = {name.lower() for name in names if name}
+        if not target_names:
+            return None
+
+        if isinstance(data, dict):
+            for key, value in data.items():
+                if str(key).lower() in target_names:
+                    return value
+
+            custom_containers = (
+                "customFields",
+                "custom_fields",
+                "userDefined",
+                "userDefinedFields",
+                "user_def",
+                "udf",
+                "UDF",
+            )
+            for container in custom_containers:
+                if container in data:
+                    found = cls._lookup_named_value(data.get(container), names)
+                    if found is not None:
+                        return found
+
+            for value in data.values():
+                if isinstance(value, (dict, list)):
+                    found = cls._lookup_named_value(value, names)
+                    if found is not None:
+                        return found
+
+        if isinstance(data, list):
+            for item in data:
+                if isinstance(item, dict):
+                    labels = [
+                        item.get("name"),
+                        item.get("code"),
+                        item.get("key"),
+                        item.get("id"),
+                        item.get("label"),
+                    ]
+                    if any(str(label).lower() in target_names for label in labels if label):
+                        for value_key in ("value", "contents", "data", "text", "boolean"):
+                            if value_key in item:
+                                return item.get(value_key)
+                    found = cls._lookup_named_value(item, names)
+                    if found is not None:
+                        return found
+
+        return None
+
+    def customer_has_free_delivery(self, customer: dict) -> bool:
+        field_names = self._field_names_from_env(
+            "SPIRE_FREE_DELIVERY_FIELDS",
+            [
+                "freeDelivery",
+                "free_delivery",
+                "webFreeDelivery",
+                "freeFreight",
+                "free_freight",
+                "noFreight",
+                "no_freight",
+            ],
+        )
+        return self._parse_bool(self._lookup_named_value(customer or {}, field_names))
+
+    async def get_customer_free_delivery(self, customer_no: str) -> bool:
+        if not customer_no:
+            return False
+        customer = await self.get_customer(customer_no)
+        return self.customer_has_free_delivery(customer)
+
+    def internal_customer_id_payload(self, internal_customer_id: str) -> dict:
+        field_name = os.getenv("SPIRE_INTERNAL_CUSTOMER_ID_FIELD", "").strip()
+        if not field_name or not internal_customer_id:
+            return {}
+
+        container = os.getenv("SPIRE_CUSTOM_FIELD_CONTAINER", "customFields").strip() or "customFields"
+        return {container: {field_name: str(internal_customer_id)}}
 
     async def create_customer(self, customer_data: dict):
         return await self._request("POST", "customers/", json=customer_data)

@@ -1,9 +1,14 @@
+import html
 import re
 from typing import Any, Optional
 
 
 DG_NAME_RE = re.compile(r"(?<![a-z0-9])DG", re.IGNORECASE)
 DG_MARKER_RE = re.compile(r"(?:\*+\s*)?\bDG\b(?:\s*\*+)?", re.IGNORECASE)
+HTML_BREAK_RE = re.compile(r"<\s*br\s*/?>", re.IGNORECASE)
+HTML_PARAGRAPH_END_RE = re.compile(r"</\s*p\s*>", re.IGNORECASE)
+HTML_TAG_RE = re.compile(r"<[^>]+>")
+ENCODING_ARTIFACT_RE = re.compile(r"\?{2,}")
 
 
 def get_field(data: Any, key: str, default: Any = None) -> Any:
@@ -29,6 +34,36 @@ def clean_dangerous_good_marker(value: Any) -> str:
     cleaned = re.sub(r"^[\s\-:|,/]+|[\s\-:|,/]+$", "", cleaned).strip()
     cleaned = re.sub(r"\s*-\s*(?=-|$)", "", cleaned).strip()
     return cleaned or original
+
+
+def text_has_encoding_artifacts(value: Any) -> bool:
+    return bool(ENCODING_ARTIFACT_RE.search(str(value or "")))
+
+
+def clean_text_encoding_artifacts(value: Any) -> str:
+    original = str(value or "").strip()
+    if not original:
+        return ""
+
+    cleaned = html.unescape(original).replace("\xa0", " ")
+    cleaned = HTML_BREAK_RE.sub(" ", cleaned)
+    cleaned = HTML_PARAGRAPH_END_RE.sub(" ", cleaned)
+    cleaned = HTML_TAG_RE.sub(" ", cleaned)
+    cleaned = (
+        cleaned
+        .replace("\u2018", "'")
+        .replace("\u2019", "'")
+        .replace("\u201c", '"')
+        .replace("\u201d", '"')
+        .replace("\u2013", "-")
+        .replace("\u2014", "-")
+    )
+    cleaned = re.sub(r"(\w)\?{2,}s\b", r"\1's", cleaned)
+    cleaned = re.sub(r"\?{2,}\"?\s*", " ", cleaned)
+    cleaned = re.sub(r"\s+", " ", cleaned).strip()
+    cleaned = re.sub(r"\s+([,.;:!?/)\]])", r"\1", cleaned)
+    cleaned = re.sub(r"([(/[])\s+", r"\1", cleaned)
+    return cleaned
 
 
 def product_name_values(product_data: Any) -> list[str]:
