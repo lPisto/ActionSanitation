@@ -79,10 +79,7 @@ def is_regular_delivery_postal_code(postal_code: Any) -> bool:
 
 def is_action_delivery(postal_code: Any, ship_code: Any = None) -> bool:
     normalized_ship_code = normalize_ship_code(ship_code)
-    return (
-        is_regular_delivery_postal_code(postal_code)
-        or normalized_ship_code in {BESTWAY_FREE_SHIP_CODE, BESTWAY_STANDARD_SHIP_CODE}
-    )
+    return normalized_ship_code == BESTWAY_FREE_SHIP_CODE or is_regular_delivery_postal_code(postal_code)
 
 
 def requires_freightcom_quote(
@@ -96,7 +93,7 @@ def requires_freightcom_quote(
     normalized_ship_code = normalize_ship_code(ship_code)
     if free_delivery or normalized_ship_code == BESTWAY_FREE_SHIP_CODE:
         return False
-    return not is_action_delivery(postal_code, ship_code)
+    return not is_regular_delivery_postal_code(postal_code)
 
 
 def calculate_shipping_breakdown(
@@ -110,6 +107,7 @@ def calculate_shipping_breakdown(
 ) -> dict:
     dangerous_goods = has_dangerous_goods(items)
     normalized_ship_code = normalize_ship_code(ship_code)
+    is_bestway = normalized_ship_code == BESTWAY_STANDARD_SHIP_CODE
     regular_delivery_area = is_action_delivery(postal_code, normalized_ship_code)
     freight_quote_required = requires_freightcom_quote(postal_code, shipping_method, free_delivery, normalized_ship_code)
 
@@ -140,12 +138,20 @@ def calculate_shipping_breakdown(
         dangerous_goods_surcharge = 0.0
         checkout_notice = "Complimentary delivery."
     elif regular_delivery_area:
-        base_shipping_cost = 0.0 if subtotal_value >= LOCAL_DELIVERY_FREE_SUBTOTAL else LOCAL_DELIVERY_SMALL_ORDER_FEE
+        local_small_order_fee = BESTWAY_SMALL_ORDER_FEE if is_bestway else LOCAL_DELIVERY_SMALL_ORDER_FEE
+        base_shipping_cost = 0.0 if subtotal_value >= LOCAL_DELIVERY_FREE_SUBTOTAL else local_small_order_fee
         dangerous_goods_surcharge = 0.0
-        checkout_notice = (
-            "Local Action delivery. Free delivery applies over "
-            f"${LOCAL_DELIVERY_FREE_SUBTOTAL:.2f}; ${LOCAL_DELIVERY_SMALL_ORDER_FEE:.2f} delivery fee under."
-        )
+        if is_bestway:
+            checkout_notice = (
+                "Delivery by Action drivers. No D.G. handling fee applies. "
+                f"Free delivery applies over ${LOCAL_DELIVERY_FREE_SUBTOTAL:.2f}; "
+                f"${local_small_order_fee:.2f} delivery fee under."
+            )
+        else:
+            checkout_notice = (
+                "Local Action delivery. Free delivery applies over "
+                f"${LOCAL_DELIVERY_FREE_SUBTOTAL:.2f}; ${local_small_order_fee:.2f} delivery fee under."
+            )
     elif freight_quote_required and freightcom_cost > 0:
         base_shipping_cost = freightcom_cost
         dangerous_goods_surcharge = OUTSIDE_DELIVERY_DG_FLAT_FEE if dangerous_goods else 0.0
@@ -155,8 +161,9 @@ def calculate_shipping_breakdown(
         dangerous_goods_surcharge = OUTSIDE_DELIVERY_DG_FLAT_FEE if dangerous_goods else 0.0
         shipping_pending_confirmation = freight_quote_required
         checkout_notice = (
-            "Shipping extra, plus D.G. handling fee may apply. "
-            "Confirmation email will follow including shipping cost and D.G. handling fee if applicable."
+            "Outside our regular delivery area. Freightcom shipping quote required; "
+            "please select On Account. Confirmation email will follow including shipping cost"
+            " and D.G. handling fee if applicable."
         )
 
     return {
