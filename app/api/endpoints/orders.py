@@ -10,7 +10,8 @@ from app.models.order import OrderCreate, OrderResponse
 from app.core.config import settings
 from app.db.mongodb import get_database
 from app.services.email_service import send_order_confirmation_email, send_pending_payment_order_notification_email
-from app.services.shipping_rules import calculate_shipping_breakdown
+from app.services.freightcom_client import quote_freightcom_shipping
+from app.services.shipping_rules import calculate_shipping_breakdown, requires_freightcom_quote
 import json
 import httpx
 import xml.etree.ElementTree as ET
@@ -535,8 +536,20 @@ class ShippingRequest(BaseModel):
     items: List[ShippingItem]
     subtotal: float
 
-def calculate_shipping_cost_response(req: ShippingRequest, free_delivery: bool = False, ship_code: str = "") -> dict:
-    return calculate_shipping_breakdown(req.subtotal, req.items, free_delivery=free_delivery, ship_code=ship_code)
+def calculate_shipping_cost_response(
+    req: ShippingRequest,
+    free_delivery: bool = False,
+    ship_code: str = "",
+    freightcom_shipping_cost: Optional[float] = None,
+) -> dict:
+    return calculate_shipping_breakdown(
+        req.subtotal,
+        req.items,
+        free_delivery=free_delivery,
+        ship_code=ship_code,
+        postal_code=req.postal_code,
+        freightcom_shipping_cost=freightcom_shipping_cost,
+    )
 
 def get_product_weight(product_id: str) -> float:
     try:
@@ -558,10 +571,18 @@ async def calculate_shipping(
     # Regla de negocio estricta: < 250 -> $20 fijo, >= 250 -> $0 (Gratis)
     # Esto tiene prioridad sobre cualquier cotización de transportista externa.
     shipping_settings = await get_customer_shipping_settings(current_user)
+    freightcom_shipping_cost = None
+    if requires_freightcom_quote(
+        req.postal_code,
+        free_delivery=shipping_settings["free_delivery"],
+        ship_code=shipping_settings["ship_code"],
+    ):
+        freightcom_shipping_cost = await quote_freightcom_shipping(req.postal_code, req.items, req.subtotal)
     return calculate_shipping_cost_response(
         req,
         free_delivery=shipping_settings["free_delivery"],
         ship_code=shipping_settings["ship_code"],
+        freightcom_shipping_cost=freightcom_shipping_cost,
     )
 
     total_weight = 0.0
@@ -684,17 +705,42 @@ async def create_order(order: OrderCreate, current_user: UserInDB = Depends(get_
     if not source_items:
         raise HTTPException(status_code=400, detail="No items found for this order.")
 
+    preliminary_shipping_address_details = (
+        address_details_to_dict(order.shipping_address_details)
+        or (existing_order or {}).get("shipping_address_details")
+        or {}
+    )
+    shipping_postal_code = first_non_empty(
+        preliminary_shipping_address_details.get("postal_code"),
+        preliminary_shipping_address_details.get("postalCode"),
+        preliminary_shipping_address_details.get("zip"),
+        current_user.zip,
+    )
     shipping_settings = await get_customer_shipping_settings(current_user)
     free_delivery = shipping_settings["free_delivery"]
     money = resolve_order_money(order, existing_order, source_items)
     shipping_cost = money["shipping_cost"]
     tax_amount = money["tax_amount"]
+    freightcom_shipping_cost = None
+    if requires_freightcom_quote(
+        shipping_postal_code,
+        order.shipping_method,
+        free_delivery=free_delivery,
+        ship_code=shipping_settings["ship_code"],
+    ):
+        freightcom_shipping_cost = await quote_freightcom_shipping(
+            shipping_postal_code,
+            source_items,
+            money["subtotal"],
+        )
     shipping_breakdown = calculate_shipping_breakdown(
         money["subtotal"],
         source_items,
         order.shipping_method,
         free_delivery=free_delivery,
         ship_code=shipping_settings["ship_code"],
+        postal_code=shipping_postal_code,
+        freightcom_shipping_cost=freightcom_shipping_cost,
     )
     required_shipping_cost = round_money(shipping_breakdown["shipping_cost"])
     if free_delivery or str(order.shipping_method or "").lower() == "pickup":
@@ -764,7 +810,7 @@ async def create_order(order: OrderCreate, current_user: UserInDB = Depends(get_
     po_number = (order.po_number or "").strip() or (existing_order or {}).get("po_number")
     order_notes = (order.order_notes or "").strip() or (existing_order or {}).get("order_notes")
     shipping_address = order.shipping_address or (existing_order or {}).get("shipping_address") or ""
-    shipping_address_details = address_details_to_dict(order.shipping_address_details) or (existing_order or {}).get("shipping_address_details")
+    shipping_address_details = preliminary_shipping_address_details
     billing_address_details = address_details_to_dict(order.billing_address_details) or (existing_order or {}).get("billing_address_details")
     reference_no = (local_order_id or "OnAccount")[:20]
     if total_amount <= 0:

@@ -9,7 +9,8 @@ from app.db.mongodb import get_database
 from app.api.deps import get_optional_current_user
 from app.models.user import UserInDB
 from app.services.spire_client import spire_client
-from app.services.shipping_rules import calculate_shipping_breakdown, items_total, round_money
+from app.services.freightcom_client import quote_freightcom_shipping
+from app.services.shipping_rules import calculate_shipping_breakdown, items_total, requires_freightcom_quote, round_money
 
 router = APIRouter()
 
@@ -21,6 +22,14 @@ def require_database():
     if db is None:
         raise HTTPException(status_code=503, detail="Database connection is not available.")
     return db
+
+
+def first_non_empty(*values) -> str:
+    for value in values:
+        normalized = normalize_address(value)
+        if normalized:
+            return normalized
+    return ""
 
 class PaymentIntentRequest(BaseModel):
     amount: float  # Converge prefiere decimales
@@ -119,12 +128,33 @@ async def create_payment_intent(
         subtotal = items_total(request.items or [])
         shipping_settings = await get_customer_shipping_settings(current_user)
         free_delivery = shipping_settings["free_delivery"]
+        shipping_details = request.shipping_address_details or {}
+        shipping_postal_code = first_non_empty(
+            shipping_details.get("postal_code"),
+            shipping_details.get("postalCode"),
+            shipping_details.get("zip"),
+            getattr(current_user, "zip", ""),
+        )
+        freightcom_shipping_cost = None
+        if requires_freightcom_quote(
+            shipping_postal_code,
+            request.shipping_method,
+            free_delivery=free_delivery,
+            ship_code=shipping_settings["ship_code"],
+        ):
+            freightcom_shipping_cost = await quote_freightcom_shipping(
+                shipping_postal_code,
+                request.items or [],
+                subtotal,
+            )
         shipping_breakdown = calculate_shipping_breakdown(
             subtotal,
             request.items or [],
             request.shipping_method,
             free_delivery=free_delivery,
             ship_code=shipping_settings["ship_code"],
+            postal_code=shipping_postal_code,
+            freightcom_shipping_cost=freightcom_shipping_cost,
         )
         shipping_cost = shipping_breakdown["shipping_cost"]
         tax_amount = round_money(request.tax_amount)
