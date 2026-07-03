@@ -12,6 +12,7 @@ from app.db.mongodb import get_database
 from app.services.email_service import send_order_confirmation_email, send_pending_payment_order_notification_email
 from app.services.freightcom_client import quote_freightcom_shipping
 from app.services.shipping_rules import calculate_shipping_breakdown, requires_freightcom_quote
+from app.services.elavon_converge import query_converge_transaction
 import json
 import httpx
 import xml.etree.ElementTree as ET
@@ -487,6 +488,9 @@ def get_transaction_href(transaction_data, base_url: str) -> Optional[str]:
     return None
 
 async def verify_elavon_payment(payment_txn_id: Optional[str], existing_order: Optional[dict]):
+    if (existing_order or {}).get("provider") == "Elavon Converge HPP":
+        return await query_converge_transaction(payment_txn_id)
+
     base_url = settings.CONVERGE_URL.rstrip("/")
     auth = (settings.ELAVON_MERCHANT_ALIAS, settings.ELAVON_SECRET_KEY)
 
@@ -767,7 +771,12 @@ async def create_order(order: OrderCreate, current_user: UserInDB = Depends(get_
         # En EPG REST, el estado exitoso suele ser "COMPLETED"
         txn_state = str(txn_data.get("state") or txn_data.get("status") or "").upper()
         if txn_state not in ("COMPLETED", "CAPTURED", "APPROVED", "AUTHORIZED"):
-            error_msg = txn_data.get("errorMessage") or txn_data.get("message") or "Transaction not completed"
+            error_msg = (
+                txn_data.get("errorMessage")
+                or txn_data.get("message")
+                or txn_data.get("ssl_result_message")
+                or "Transaction not completed"
+            )
             if existing_order:
                 await db["orders"].update_one(
                     {"_id": existing_order["_id"]},

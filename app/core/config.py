@@ -19,6 +19,12 @@ class Settings(BaseSettings):
     ELAVON_PUBLIC_KEY: str
     ELAVON_SECRET_KEY: str
     ELAVON_MERCHANT_ALIAS: str
+    CONVERGE_HPP_URL: str = ""
+    CONVERGE_XML_URL: str = ""
+    ELAVON_CONVERGE_ACCOUNT_ID: str = ""
+    ELAVON_CONVERGE_USER_ID: str = ""
+    ELAVON_CONVERGE_PIN: str = ""
+    ELAVON_CONVERGE_VENDOR_ID: str = ""
     
     SECRET_KEY: str
     ALGORITHM: str = "HS256"

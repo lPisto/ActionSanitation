@@ -11,6 +11,11 @@ from app.models.user import UserInDB
 from app.services.spire_client import spire_client
 from app.services.freightcom_client import quote_freightcom_shipping
 from app.services.shipping_rules import calculate_shipping_breakdown, items_total, requires_freightcom_quote, round_money
+from app.services.elavon_converge import (
+    converge_hpp_configured,
+    converge_hpp_payment_url,
+    create_converge_hpp_token,
+)
 
 router = APIRouter()
 
@@ -166,6 +171,64 @@ async def create_payment_intent(
             elif amount < expected_amount:
                 amount = expected_amount
 
+        frontend_url = settings.FRONTEND_URLS.split(",")[0].strip().rstrip("/")
+
+        if converge_hpp_configured():
+            success_url = f"{frontend_url}/checkout/success?local_order_id={local_order_id}"
+            cancel_url = f"{frontend_url}/checkout/cancel?local_order_id={local_order_id}"
+            token = await create_converge_hpp_token(
+                amount=amount,
+                local_order_id=local_order_id,
+                customer_email=request.customer_email,
+                billing_address_details=request.billing_address_details,
+                frontend_success_url=success_url,
+                frontend_cancel_url=cancel_url,
+            )
+
+            db = require_database()
+            now = datetime.utcnow().isoformat()
+            local_order = {
+                "id": local_order_id,
+                "local_order_id": local_order_id,
+                "payment_session_id": local_order_id,
+                "elavon_order_id": None,
+                "elavon_order_href": None,
+                "elavon_payment_session_href": None,
+                "customer_email": request.customer_email,
+                "total_amount": amount,
+                "items": request.items,
+                "shipping_address": normalize_address(request.shipping_address) or None,
+                "shipping_address_details": request.shipping_address_details,
+                "shipping_method": request.shipping_method,
+                "billing_address": normalize_address(request.billing_address) or None,
+                "billing_address_details": request.billing_address_details,
+                "po_number": (request.po_number or "").strip() or None,
+                "order_notes": (request.order_notes or "").strip() or None,
+                "free_tshirt_size": (request.free_tshirt_size or "").strip() or None,
+                "shipping_cost": shipping_cost,
+                "tax_amount": tax_amount,
+                "status": "Payment Pending",
+                "provider": "Elavon Converge HPP",
+                "updated_at": now,
+            }
+
+            await db["orders"].update_one(
+                {"id": local_order_id},
+                {
+                    "$set": local_order,
+                    "$setOnInsert": {"created_at": now, "spire_order_no": None},
+                },
+                upsert=True,
+            )
+
+            return {
+                "paymentSessionId": local_order_id,
+                "localOrderId": local_order_id,
+                "paymentSessionUrl": None,
+                "elavonHppUrl": converge_hpp_payment_url(),
+                "elavonHppFields": {"ssl_txn_auth_token": token},
+            }
+
         order_payload = {
             "total": {
                 "amount": f"{amount:.2f}",
@@ -206,8 +269,6 @@ async def create_payment_intent(
                 status_code=400,
                 detail=f"Could not create Elavon order: {order_data}"
             )
-
-        frontend_url = settings.FRONTEND_URLS.split(",")[0].strip().rstrip("/")
 
         payment_session_payload = {
             "order": order_href,
@@ -302,6 +363,12 @@ async def create_payment_intent(
 
     except HTTPException:
         raise
+
+    except RuntimeError as e:
+        raise HTTPException(
+            status_code=502,
+            detail=str(e)
+        )
 
     except Exception as e:
         raise HTTPException(
