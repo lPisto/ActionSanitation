@@ -129,3 +129,34 @@ def product_upload_is_enabled(product_data: Any) -> bool:
         if parsed is not None:
             return parsed
     return True
+
+
+def product_is_active(product_data: Any, warehouse: str = "00") -> bool:
+    """Whether the Spire inventory item is ACTIVE in the given warehouse.
+
+    Spire rejects a sales order line whose inventory is inactive
+    ("BusinessViolationError: Inventory is inactive"). We use the per-warehouse
+    `status` flag ('A' = active). Missing/unknown status is treated as active so
+    we never hide valid products when Spire omits the field.
+    """
+    inv = nested_inventory(product_data)
+    for source in (product_data, inv):
+        # List responses: single `warehouse: {status: 'A'}`
+        wh = get_field(source, "warehouse")
+        if isinstance(wh, dict):
+            status = str(wh.get("status") or "").strip().upper()
+            if status:
+                return status == "A"
+        # Detail responses may carry a `warehouses` list
+        whs = get_field(source, "warehouses")
+        if isinstance(whs, list):
+            for w in whs:
+                if not isinstance(w, dict):
+                    continue
+                code = str(w.get("whse") or w.get("code") or w.get("warehouse") or "").strip()
+                if code and code != warehouse:
+                    continue
+                status = str(w.get("status") or "").strip().upper()
+                if status:
+                    return status == "A"
+    return True

@@ -1082,6 +1082,22 @@ async def create_order(order: OrderCreate, current_user: UserInDB = Depends(get_
     except HTTPException as e:
         # Registra el error detallado en la consola del backend
         print(f"Spire ERP Error details: {e.detail}")
+
+        # Spire rejects the whole order if any line item is inactive/unavailable.
+        # Give the customer a clear, actionable message naming the offending item.
+        error_detail = str(e.detail)
+        if "inactive" in error_detail.lower():
+            offending_part = ""
+            if "/" in error_detail:
+                tail = error_detail.split("/")[-1]
+                offending_part = tail.split('"')[0].split("\\")[0].strip()
+            friendly = (
+                "One of the products in your cart is no longer available"
+                + (f" (item {offending_part})" if offending_part else "")
+                + ". Please remove it from your cart and try again."
+            )
+            raise HTTPException(status_code=400, detail=friendly)
+
         if order.payment_method == "e_transfer":
             fallback_billing_address = resolve_billing_address(order.billing_address, shipping_address, existing_order)
             await db["orders"].update_one(

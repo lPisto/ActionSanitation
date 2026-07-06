@@ -9,6 +9,7 @@ from app.services.spire_client import spire_client
 from app.services.product_rules import (
     clean_dangerous_good_marker,
     clean_text_encoding_artifacts,
+    product_is_active,
     product_is_dangerous_good,
     product_upload_is_enabled,
     text_has_encoding_artifacts,
@@ -22,6 +23,11 @@ router = APIRouter()
 
 def is_product_active(product_data: dict) -> bool:
     if not product_upload_is_enabled(product_data):
+        return False
+
+    # Skip items Spire has marked inactive in the warehouse — they cannot be ordered
+    # (Spire rejects the sales order with "Inventory is inactive").
+    if not product_is_active(product_data):
         return False
 
     # For deals (price_matrix), description is often nested
@@ -604,7 +610,7 @@ async def update_product_categories(
 @router.get("/{product_id}")
 async def get_product(product_id: str, request: Request, current_user: Optional[UserInDB] = Depends(get_optional_current_user)):
     product = await spire_client.get_product(product_id)
-    if not product_upload_is_enabled(product):
+    if not product_upload_is_enabled(product) or not product_is_active(product):
         raise HTTPException(status_code=404, detail="Product not found")
 
     db = get_database()
