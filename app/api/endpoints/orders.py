@@ -207,23 +207,68 @@ def provider_for(method: str) -> str:
         return "E-Transfer"
     return "Elavon"
 
-def payment_note_for(method: str) -> str:
+def payment_note_for(method: str, total_amount: Optional[float] = None, txn_id: Optional[str] = None) -> str:
     if method in COD_PAYMENT_METHODS:
-        return "Payment due upon delivery."
+        return "*** PAYMENT DUE ON DELIVERY — not yet paid. ***"
     if method == "e_transfer":
-        return "E-transfer payment pending."
-    return ""
+        return "*** E-TRANSFER PENDING — awaiting customer payment. ***"
+    amount_txt = f" ${total_amount:.2f} CAD" if total_amount else ""
+    ref_txt = f" Ref: {txn_id}." if txn_id else ""
+    return f"*** PAID ONLINE — order already paid{amount_txt} by credit card through the website.{ref_txt} ***"
 
-def spire_order_notes(customer_notes: str, payment_method: str) -> str:
+def format_address_note(addr: dict) -> str:
+    """Human-readable single-line address for a Spire order note."""
+    if not addr:
+        return ""
+    city_line = " ".join(
+        part for part in [addr.get("city"), addr.get("provState"), addr.get("postalCode")] if part
+    )
+    parts = [addr.get("name"), addr.get("line1"), city_line, addr.get("country")]
+    return ", ".join(part for part in parts if part)
+
+def spire_order_notes(
+    customer_notes: str,
+    payment_method: str,
+    total_amount: Optional[float] = None,
+    txn_id: Optional[str] = None,
+    shipping_method: Optional[str] = None,
+    ship_address: Optional[dict] = None,
+    bill_address: Optional[dict] = None,
+    promo_note: str = "",
+) -> str:
+    """Build the Spire order note body.
+
+    Spire has no dedicated web/paid flag, so we surface everything the warehouse
+    and accounting need directly in the order note: payment status, the exact
+    ship-to/bill-to used at checkout, promo items and customer notes.
+    """
     pieces = []
-    payment_note = payment_note_for(payment_method)
+    payment_note = payment_note_for(payment_method, total_amount, txn_id)
     if payment_note:
         pieces.append(payment_note)
+
+    is_pickup = str(shipping_method or "").strip().lower() == "pickup"
+    if is_pickup:
+        pieces.append("Fulfillment: PICKUP at store.")
+    else:
+        ship_line = format_address_note(ship_address or {})
+        if ship_line:
+            pieces.append(f"Ship to: {ship_line}")
+
+    bill_line = format_address_note(bill_address or {})
+    ship_line = format_address_note(ship_address or {})
+    if bill_line and bill_line.lower() != ship_line.lower():
+        pieces.append(f"Bill to: {bill_line}")
+
+    if promo_note:
+        pieces.append(promo_note)
     if customer_notes:
         pieces.append(f"Customer notes: {customer_notes}")
-    return " | ".join(pieces)[:250]
+    return " | ".join(pieces)[:3500]
 
-FREE_TSHIRT_DEFAULT_SIZES = ["S", "M", "L", "XL", "2XL"]
+FREE_TSHIRT_DEFAULT_SIZES = ["S", "M", "L", "XL"]
+# Sizes explicitly not offered for the free T-shirt (per Dennis: no 2XL).
+FREE_TSHIRT_EXCLUDED_SIZES = {"2XL", "XXL"}
 PROMO_ORDER_STATUSES_NOT_COUNTED = {"Payment Pending", "Payment Failed", "Cancelled", "Canceled"}
 
 def free_tshirt_promo_enabled() -> bool:
@@ -261,7 +306,9 @@ def free_tshirt_sku_map() -> Dict[str, str]:
 
 def free_tshirt_available_sizes() -> List[str]:
     configured_sizes = list(free_tshirt_sku_map().keys())
-    return configured_sizes or free_tshirt_size_options()
+    sizes = configured_sizes or free_tshirt_size_options()
+    # Never offer excluded sizes (e.g. 2XL), regardless of env/SKU configuration.
+    return [size for size in sizes if size.upper() not in FREE_TSHIRT_EXCLUDED_SIZES]
 
 def normalize_free_tshirt_size(size: Optional[str]) -> Optional[str]:
     normalized = (size or "").strip().upper()
@@ -400,7 +447,7 @@ def spire_note_subject(payment_method: str) -> str:
         return "Payment Due on Delivery"
     if payment_method == "e_transfer":
         return "E-Transfer Pending"
-    return "Website Order Notes"
+    return "Paid Online"
 
 async def create_spire_order_note_safe(order_id: Optional[str], note_body: str, payment_method: str):
     order_id = valid_order_identifier(order_id)
@@ -409,7 +456,9 @@ async def create_spire_order_note_safe(order_id: Optional[str], note_body: str, 
         return
 
     subject = spire_note_subject(payment_method)
-    alert = payment_method in DIRECT_ORDER_PAYMENT_METHODS
+    # Alert on every web order so staff get a clear popup in Spire — including
+    # "Paid Online" orders, which previously had no visible paid indicator.
+    alert = True
     payload = {
         "subject": subject[:60],
         "body": note_body[:4000],
@@ -969,9 +1018,16 @@ async def create_order(order: OrderCreate, current_user: UserInDB = Depends(get_
         })
 
     spire_reference_no = f"WEB-{reference_no}"[:20] if not str(reference_no).upper().startswith("WEB") else reference_no
-    spire_notes = spire_order_notes(order_notes or "", order.payment_method)
-    if promo_note:
-        spire_notes = " | ".join([note for note in (spire_notes, promo_note) if note])[:250]
+    spire_notes = spire_order_notes(
+        order_notes or "",
+        order.payment_method,
+        total_amount=total_amount,
+        txn_id=order.stripe_payment_intent_id,
+        shipping_method=order.shipping_method,
+        ship_address=shipping_spire_address,
+        bill_address=billing_spire_address,
+        promo_note=promo_note,
+    )
     staff_order_notes = " | ".join([note for note in (order_notes, promo_note) if note])[:500]
 
     # 2. Map to Spire Order format according to the API schema
@@ -1136,6 +1192,7 @@ async def create_order(order: OrderCreate, current_user: UserInDB = Depends(get_
             items=saved_items,
             total_amount=total_amount,
             shipping_address=shipping_address or "N/A",
+            shipping_method=order.shipping_method or "delivery",
             promo_note=promo_note,
         )
     except Exception as e:

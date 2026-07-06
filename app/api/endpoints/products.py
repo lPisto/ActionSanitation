@@ -2,6 +2,7 @@ from fastapi import APIRouter, Depends, Query, Response, HTTPException, Request,
 import base64
 import os
 import json
+import re
 from datetime import datetime
 from app.core.config import settings
 from app.services.spire_client import spire_client
@@ -32,11 +33,14 @@ def is_product_active(product_data: dict) -> bool:
     display_description = clean_dangerous_good_marker(description)
     normalized_description = display_description.lower().replace(" ", "")
     description_lower = display_description.lower()
+    # NOTE: we intentionally do NOT exclude on a bare "disc" substring anymore — it
+    # was hiding legitimate products (e.g. urinal/cleaning "discs"). We only exclude
+    # clearly discontinued items ("discontinued", "do not use", or a leading "*").
     if (
         "*" in display_description
         or "discontinued" in description_lower
         or "do not use" in description_lower
-        or "disc" in description_lower
+        or re.search(r"\bdisc'?d\b", description_lower)  # "disc'd" / "discd" abbreviation for discontinued
         or "sample" in description_lower
         or "500ml" in normalized_description
     ):
@@ -287,7 +291,28 @@ def normalize_product_data(record: dict, request: Request = None, customer_prici
     record["short_description"] = product_name
 
     raw_mongo_long = (metadata.get("description") or "") if metadata else ""
-    raw_spire_ext = record.get("extendedDescription") or inv.get("extendedDescription") or ""
+    # Spire installs store the long/marketing description in different fields depending
+    # on setup. Read the common ones (not just extendedDescription) so descriptions that
+    # exist in Spire don't show up blank on the website.
+    spire_long_desc_fields = (
+        "extendedDescription",
+        "longDescription",
+        "webDescription",
+        "webDesc",
+        "detailedDescription",
+        "webLongDescription",
+    )
+    raw_spire_ext = ""
+    for source in (record, inv):
+        if not isinstance(source, dict):
+            continue
+        for field_name in spire_long_desc_fields:
+            candidate = source.get(field_name)
+            if candidate and str(candidate).strip():
+                raw_spire_ext = candidate
+                break
+        if raw_spire_ext:
+            break
     mongo_long = clean_text_encoding_artifacts(raw_mongo_long)
     spire_ext = clean_text_encoding_artifacts(raw_spire_ext)
     

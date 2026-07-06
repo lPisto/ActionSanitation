@@ -74,6 +74,14 @@ def build_spire_customer_payload(user_in: UserCreate, customer_no: str) -> dict:
         }
     }
 
+def build_spire_customer_update_payload(user_in: UserCreate) -> dict:
+    """Fields pushed back into an EXISTING Spire customer when an account is
+    approved/linked, so the web-entered contact + address info is synced."""
+    payload = build_spire_customer_payload(user_in, "")
+    payload.pop("customerNo", None)
+    payload.pop("status", None)
+    return payload
+
 def user_create_from_record(user_record: dict) -> UserCreate:
     user = user_record.get("registration_payload") or user_record.get("user", {})
     return UserCreate(
@@ -240,32 +248,79 @@ async def approve_account(req: AccountApprovalRequest, x_admin_token: Optional[s
 
     requested_spire_customer_no = (req.spire_customer_no or "").strip()
     existing_spire_customer_no = (user_doc.get("spire_customer_no") or "").strip()
-    spire_customer_no = requested_spire_customer_no or existing_spire_customer_no
+    target_customer_no = requested_spire_customer_no or existing_spire_customer_no
+
+    # Guard: never let two different accounts point at the same Spire customer.
+    if target_customer_no:
+        duplicate = await db["users"].find_one({
+            "email": {"$ne": req.email},
+            "user.spire_customer_no": target_customer_no,
+            "approved": True,
+        })
+        if duplicate:
+            raise HTTPException(
+                status_code=409,
+                detail=(
+                    f"Spire customer {target_customer_no} is already linked to another approved "
+                    f"account ({duplicate.get('email')}). Each Spire customer can only be linked once."
+                ),
+            )
+
+    user_in = user_create_from_record(user_record)
+
+    # Does the target number already exist in Spire?
+    target_exists_in_spire = False
+    if target_customer_no:
+        try:
+            await spire_client.get_customer(target_customer_no)
+            target_exists_in_spire = True
+        except HTTPException as e:
+            if e.status_code != 404:
+                raise HTTPException(status_code=400, detail=f"Spire customer could not be verified: {e.detail}")
+
+    spire_customer_no = target_customer_no
+    sync_web_info_to_spire = False
 
     if req.create_spire_customer:
-        if spire_customer_no:
+        if target_exists_in_spire:
+            # The number already exists — link to it and sync the web info instead
+            # of creating a duplicate customer with a different number.
+            spire_customer_no = target_customer_no
+            sync_web_info_to_spire = True
+        else:
+            # Create the Spire customer. Use the number the admin typed when provided;
+            # only generate one when the field was left blank.
+            new_customer_no = target_customer_no or f"W{uuid.uuid4().hex[:9]}".upper()
+            spire_customer_data = build_spire_customer_payload(user_in, new_customer_no)
+            try:
+                spire_response = await spire_client.create_customer(spire_customer_data)
+                spire_customer_no = spire_response.get("customerNo", new_customer_no)
+            except HTTPException as e:
+                raise HTTPException(status_code=400, detail=f"Spire ERP Error: {e.detail}")
+            except Exception as e:
+                raise HTTPException(status_code=500, detail=f"Unexpected error communicating with Spire: {str(e)}")
+    else:
+        # Plain "Approve": link to an EXISTING Spire customer only.
+        if not spire_customer_no:
+            raise HTTPException(status_code=400, detail="Approval requires an existing Spire customer number, or use 'Create & Approve' to create one.")
+        if not target_exists_in_spire:
             raise HTTPException(
-                status_code=400,
-                detail="This account already has a Spire customer number. Approve the existing Spire customer instead of creating a new one."
+                status_code=404,
+                detail=f"Spire customer {spire_customer_no} does not exist. Use 'Create & Approve' to create it.",
             )
-        generated_customer_no = f"W{uuid.uuid4().hex[:9]}".upper()
-        user_in = user_create_from_record(user_record)
-        spire_customer_data = build_spire_customer_payload(user_in, generated_customer_no)
+        # Existing customer → push the web-entered contact/address info to Spire.
+        sync_web_info_to_spire = True
+
+    # Sync the web-entered profile (name, email, phone, address) into the existing
+    # Spire customer record so approving reflects the latest info the customer gave.
+    web_info_sync = None
+    if sync_web_info_to_spire:
         try:
-            spire_response = await spire_client.create_customer(spire_customer_data)
-            spire_customer_no = spire_response.get("customerNo", generated_customer_no)
-        except HTTPException as e:
-            raise HTTPException(status_code=400, detail=f"Spire ERP Error: {e.detail}")
+            await spire_client.update_customer(spire_customer_no, build_spire_customer_update_payload(user_in))
+            web_info_sync = {"synced": True}
         except Exception as e:
-            raise HTTPException(status_code=500, detail=f"Unexpected error communicating with Spire: {str(e)}")
-
-    if not spire_customer_no:
-        raise HTTPException(status_code=400, detail="Approval requires an existing Spire customer number or create_spire_customer=true.")
-
-    try:
-        await spire_client.get_customer(spire_customer_no)
-    except HTTPException as e:
-        raise HTTPException(status_code=400, detail=f"Spire customer could not be verified: {e.detail}")
+            print(f"Could not sync web profile to Spire for {spire_customer_no}: {e}")
+            web_info_sync = {"synced": False, "error": str(e)}
 
     user_doc["spire_customer_no"] = spire_customer_no
     user_doc["internal_customer_id"] = internal_customer_id_for(user_record, user_doc)
@@ -281,12 +336,17 @@ async def approve_account(req: AccountApprovalRequest, x_admin_token: Optional[s
             "account_status": "approved",
             "approved": True,
             "spire_internal_customer_id_sync": internal_id_sync,
+            "spire_web_info_sync": web_info_sync,
             "approved_at": datetime.utcnow().isoformat(),
             "updated_at": datetime.utcnow().isoformat()
         }}
     )
 
-    return {"message": "Account approved", "spire_customer_no": spire_customer_no}
+    return {
+        "message": "Account approved",
+        "spire_customer_no": spire_customer_no,
+        "web_info_synced": bool(web_info_sync and web_info_sync.get("synced")),
+    }
 
 @router.post("/impersonate", response_model=Token)
 async def impersonate(req: ImpersonateRequest, x_admin_token: Optional[str] = Header(None)):

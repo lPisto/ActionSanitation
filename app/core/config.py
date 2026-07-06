@@ -33,6 +33,7 @@ class Settings(BaseSettings):
     MAIL_USERNAME: str = ""
     MAIL_PASSWORD: str = ""
     MAIL_FROM: str = ""
+    MAIL_REPLY_TO: str = ""
     MAIL_PORT: int = 587
     MS_CLIENT_ID: str
     MS_OBJECT_ID: str

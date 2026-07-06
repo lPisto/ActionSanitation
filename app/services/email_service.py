@@ -45,12 +45,25 @@ async def send_email_via_graph(subject: str, recipients: list, html_content: str
         "saveToSentItems": "true"
     }
 
+    reply_to = str(
+        getattr(settings, "MAIL_REPLY_TO", "")
+        or getattr(settings, "MAIL_FROM", "")
+        or ""
+    ).strip()
+    if reply_to:
+        email_msg["message"]["replyTo"] = [{"emailAddress": {"address": reply_to}}]
+
     sender_candidates = []
-    for sender in (
-        getattr(settings, "MS_GRAPH_SENDER", ""),
-        getattr(settings, "MAIL_FROM", ""),
-        getattr(settings, "MAIL_USERNAME", ""),
-    ):
+    configured_mail_from = str(getattr(settings, "MAIL_FROM", "") or "").strip()
+    sender_sources = (
+        (configured_mail_from,)
+        if configured_mail_from
+        else (
+            getattr(settings, "MS_GRAPH_SENDER", ""),
+            getattr(settings, "MAIL_USERNAME", ""),
+        )
+    )
+    for sender in sender_sources:
         sender = str(sender or "").strip()
         if sender and sender not in sender_candidates:
             sender_candidates.append(sender)
@@ -99,6 +112,7 @@ async def send_order_confirmation_email(
     items: list,
     total_amount: float,
     shipping_address: str,
+    shipping_method: str = "delivery",
     promo_note: str = "",
 ):
     items_html = "".join([
@@ -107,21 +121,34 @@ async def send_order_confirmation_email(
         for item in items
     ])
 
+    is_pickup = str(shipping_method or "").strip().lower() == "pickup"
+    # Pickup orders get pickup-specific wording (no shipping/delivery language, and we
+    # never promise a shipment confirmation email since we don't send those).
+    if is_pickup:
+        fulfillment_html = (
+            "<p><strong>Fulfillment:</strong> Pickup at our store.</p>"
+            "<p>We will prepare your order and contact you when it is ready for pickup.</p>"
+        )
+    else:
+        fulfillment_html = (
+            f"<p><strong>Delivery address:</strong> {shipping_address}</p>"
+            "<p>We will process your order and contact you if any delivery details need confirmation.</p>"
+        )
+
     html = f"""
     <div style="font-family: Arial, sans-serif; max-width: 600px; margin: auto; color: #333;">
         <h2 style="color: #2563eb;">Thank you for your order, {name}!</h2>
         <p>Your order <strong>#{order_id}</strong> has been successfully confirmed and is now being processed.</p>
-        
+
         <h3 style="border-bottom: 1px solid #ccc; padding-bottom: 5px;">Order Details</h3>
         <ul>
             {items_html}
         </ul>
         {f"<p style='background:#ecfdf5; border:1px solid #bbf7d0; padding:12px; border-radius:8px;'><strong>{promo_note}</strong></p>" if promo_note else ""}
         <p><strong>Total Amount (incl. shipping & taxes):</strong> ${total_amount:.2f}</p>
-        <p><strong>Shipping Address:</strong> {shipping_address}</p>
-        
+        {fulfillment_html}
         <br>
-        <p>We will notify you once your order ships. If you have any questions, feel free to reply to this email.</p>
+        <p>If you have any questions, feel free to reply to this email.</p>
         <p>Best regards,<br><strong>Action Sanitation</strong></p>
     </div>
     """
