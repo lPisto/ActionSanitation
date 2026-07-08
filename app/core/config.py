@@ -13,7 +13,7 @@ class Settings(BaseSettings):
 
     
     
-    # CONVERGE_URL: str
+    CONVERGE_URL: str
     # ELAVON_MERCHANT_ID: str
     # ELAVON_PROCESSOR_ID: str
     # ELAVON_PUBLIC_KEY: str
