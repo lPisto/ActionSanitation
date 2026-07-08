@@ -23,13 +23,13 @@ class Settings(BaseSettings):
     ALGORITHM: str = "HS256"
     ACCESS_TOKEN_EXPIRE_MINUTES: int = 1440 # 24 hours
 
-    CONVERGE_URL: str
-    ELAVON_MERCHANT_ID: str
-    ELAVON_PROCESSOR_ID: str
-    ELAVON_PUBLIC_KEY: str
-    ELAVON_SECRET_KEY: str
-    # El alias suele ser el nombre comercial, guárdalo por si acaso
-    ELAVON_MERCHANT_ALIAS: str
+    # CONVERGE_URL: str
+    # ELAVON_MERCHANT_ID: str
+    # ELAVON_PROCESSOR_ID: str
+    # ELAVON_PUBLIC_KEY: str
+    # ELAVON_SECRET_KEY: str
+    # # El alias suele ser el nombre comercial, guárdalo por si acaso
+    # ELAVON_MERCHANT_ALIAS: str
 
     ACCOUNT_APPROVAL_TOKEN: str
     
