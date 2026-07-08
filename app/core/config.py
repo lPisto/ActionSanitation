@@ -13,12 +13,12 @@ class Settings(BaseSettings):
 
     
     
-    CONVERGE_URL: str
-    ELAVON_MERCHANT_ID: str
-    ELAVON_PROCESSOR_ID: str
-    ELAVON_PUBLIC_KEY: str
-    ELAVON_SECRET_KEY: str
-    ELAVON_MERCHANT_ALIAS: str
+    # CONVERGE_URL: str
+    # ELAVON_MERCHANT_ID: str
+    # ELAVON_PROCESSOR_ID: str
+    # ELAVON_PUBLIC_KEY: str
+    # ELAVON_SECRET_KEY: str
+    # ELAVON_MERCHANT_ALIAS: str
     CONVERGE_HPP_URL: str = ""
     CONVERGE_XML_URL: str = ""
     ELAVON_CONVERGE_ACCOUNT_ID: str = ""
