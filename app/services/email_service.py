@@ -122,23 +122,18 @@ async def send_order_confirmation_email(
     ])
 
     is_pickup = str(shipping_method or "").strip().lower() == "pickup"
-    # Pickup orders get pickup-specific wording (no shipping/delivery language, and we
-    # never promise a shipment confirmation email since we don't send those).
-    if is_pickup:
-        fulfillment_html = (
-            "<p><strong>Fulfillment:</strong> Pickup at our store.</p>"
-            "<p>We will prepare your order and contact you when it is ready for pickup.</p>"
-        )
-    else:
-        fulfillment_html = (
-            f"<p><strong>Delivery address:</strong> {shipping_address}</p>"
-            "<p>We will process your order and contact you if any delivery details need confirmation.</p>"
-        )
+    # Show the relevant address label (pickup vs delivery); the body message is kept
+    # simple per client request — no shipment-confirmation promises.
+    fulfillment_html = (
+        "<p><strong>Fulfillment:</strong> Pickup at our store.</p>"
+        if is_pickup
+        else f"<p><strong>Delivery address:</strong> {shipping_address}</p>"
+    )
 
     html = f"""
     <div style="font-family: Arial, sans-serif; max-width: 600px; margin: auto; color: #333;">
         <h2 style="color: #2563eb;">Thank you for your order, {name}!</h2>
-        <p>Your order <strong>#{order_id}</strong> has been successfully confirmed and is now being processed.</p>
+        <p>Your order <strong>#{order_id}</strong> has been received and is now being processed.</p>
 
         <h3 style="border-bottom: 1px solid #ccc; padding-bottom: 5px;">Order Details</h3>
         <ul>

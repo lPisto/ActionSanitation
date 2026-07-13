@@ -208,13 +208,11 @@ def provider_for(method: str) -> str:
     return "Elavon"
 
 def payment_note_for(method: str, total_amount: Optional[float] = None, txn_id: Optional[str] = None) -> str:
-    if method in COD_PAYMENT_METHODS:
-        return "*** PAYMENT DUE ON DELIVERY — not yet paid. ***"
-    if method == "e_transfer":
-        return "*** E-TRANSFER PENDING — awaiting customer payment. ***"
+    if method in COD_PAYMENT_METHODS or method == "e_transfer":
+        return "*** NOT PAID ***"
     amount_txt = f" ${total_amount:.2f} CAD" if total_amount else ""
     ref_txt = f" Ref: {txn_id}." if txn_id else ""
-    return f"*** PAID ONLINE — order already paid{amount_txt} by credit card through the website.{ref_txt} ***"
+    return f"*** PAID ***{amount_txt} by credit card through the website.{ref_txt}"
 
 def format_address_note(addr: dict) -> str:
     """Human-readable single-line address for a Spire order note."""
@@ -443,11 +441,9 @@ async def create_spire_order_with_fallback(order_data: dict) -> dict:
     return await spire_client.create_sales_order(fallback_without_freight)
 
 def spire_note_subject(payment_method: str) -> str:
-    if payment_method in COD_PAYMENT_METHODS:
-        return "Payment Due on Delivery"
-    if payment_method == "e_transfer":
-        return "E-Transfer Pending"
-    return "Paid Online"
+    if payment_method in COD_PAYMENT_METHODS or payment_method == "e_transfer":
+        return "Not Paid"
+    return "Paid"
 
 async def create_spire_order_note_safe(order_id: Optional[str], note_body: str, payment_method: str):
     order_id = valid_order_identifier(order_id)

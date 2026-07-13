@@ -12,6 +12,7 @@ from app.services.product_rules import (
     product_is_active,
     product_is_dangerous_good,
     product_upload_is_enabled,
+    strip_annotation_markers,
     text_has_encoding_artifacts,
 )
 from app.api.deps import get_current_user, get_optional_current_user, get_database
@@ -35,18 +36,18 @@ def is_product_active(product_data: dict) -> bool:
     # For direct products (inventory/items), or as a fallback, check root
     if not description:
         description = product_data.get("description", "")
-    
-    display_description = clean_dangerous_good_marker(description)
-    normalized_description = display_description.lower().replace(" ", "")
-    description_lower = display_description.lower()
-    # NOTE: we intentionally do NOT exclude on a bare "disc" substring anymore — it
-    # was hiding legitimate products (e.g. urinal/cleaning "discs"). We only exclude
-    # clearly discontinued items ("discontinued", "do not use", or a leading "*").
+
+    description_lower = str(description).lower()
+    normalized_description = description_lower.replace(" ", "")
+    # We do NOT hide on a bare "*" anymore: "*" is also used for the dangerous-goods
+    # marker (**DGLQ**) on perfectly valid products. Hide only clearly non-sellable
+    # items: discontinued, "do not use", superseded ("use part…"/"see <part#>"),
+    # samples, and 500ml trial sizes.
     if (
-        "*" in display_description
-        or "discontinued" in description_lower
+        "discontinued" in description_lower
         or "do not use" in description_lower
-        or re.search(r"\bdisc'?d\b", description_lower)  # "disc'd" / "discd" abbreviation for discontinued
+        or "use part" in description_lower
+        or re.search(r"\bdisc'?d\b", description_lower)  # "disc'd" / "discd"
         or "sample" in description_lower
         or "500ml" in normalized_description
     ):
@@ -289,6 +290,8 @@ def normalize_product_data(record: dict, request: Request = None, customer_prici
     raw_product_name = clean_text_encoding_artifacts(record.get("description") or inv.get("description", ""))
     is_dangerous_good = product_is_dangerous_good(record, metadata)
     product_name = clean_dangerous_good_marker(raw_product_name)
+    # Strip asterisk-wrapped internal markers (**DGLQ**, *HEAD ONLY*, etc.) from the name.
+    product_name = strip_annotation_markers(product_name)
     
     record["title"] = product_name
     # Mantenemos 'name' y 'description' como el título limpio para el frontend.

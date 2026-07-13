@@ -5,6 +5,8 @@ from typing import Any, Optional
 
 DG_NAME_RE = re.compile(r"(?<![a-z0-9])DG", re.IGNORECASE)
 DG_MARKER_RE = re.compile(r"(?:\*+\s*)?\bDG\b(?:\s*\*+)?", re.IGNORECASE)
+# Any asterisk-wrapped annotation, e.g. **DGLQ**, *DGLQ*, **CLEARANCE**, *HEAD ONLY*.
+ANNOTATION_MARKER_RE = re.compile(r"\*{1,2}[^*]*\*{1,2}")
 HTML_BREAK_RE = re.compile(r"<\s*br\s*/?>", re.IGNORECASE)
 HTML_PARAGRAPH_END_RE = re.compile(r"</\s*p\s*>", re.IGNORECASE)
 HTML_TAG_RE = re.compile(r"<[^>]+>")
@@ -34,6 +36,20 @@ def clean_dangerous_good_marker(value: Any) -> str:
     cleaned = re.sub(r"^[\s\-:|,/]+|[\s\-:|,/]+$", "", cleaned).strip()
     cleaned = re.sub(r"\s*-\s*(?=-|$)", "", cleaned).strip()
     return cleaned or original
+
+
+def strip_annotation_markers(value: Any) -> str:
+    """Remove asterisk-wrapped annotations (e.g. **DGLQ**, *HEAD ONLY*) and any stray
+    asterisks from a product name so internal markers don't show on the storefront."""
+    text = str(value or "")
+    if not text:
+        return ""
+    text = ANNOTATION_MARKER_RE.sub(" ", text)
+    text = text.replace("*", " ")
+    text = re.sub(r"\s+", " ", text).strip()
+    text = re.sub(r"\s+([,.;:/)\]])", r"\1", text)
+    text = re.sub(r"[\s\-]+$", "", text).strip()
+    return text
 
 
 def text_has_encoding_artifacts(value: Any) -> bool:
