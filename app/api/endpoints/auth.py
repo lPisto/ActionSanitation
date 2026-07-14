@@ -172,6 +172,21 @@ async def register(user_in: UserCreate):
 
     spire_customer_no = spire_customer.get("customerNo") if spire_customer else ""
 
+    # Existing Spire customers (matched by email) are approved automatically — only
+    # brand-new customers (no Spire match) need manual admin approval.
+    auto_approve = bool(spire_customer_no)
+    if auto_approve:
+        # Safety: don't auto-link if another approved account already uses this Spire
+        # customer number — leave it for admin review instead.
+        duplicate = await db["users"].find_one({
+            "user.spire_customer_no": spire_customer_no,
+            "approved": True,
+        })
+        if duplicate:
+            auto_approve = False
+
+    account_status = "approved" if auto_approve else "pending_approval"
+
     # 3. Save to local DB (MongoDB)
     user_count = await db["users"].count_documents({})
     internal_customer_id = str(user_count + 1)
@@ -194,23 +209,35 @@ async def register(user_in: UserCreate):
         billing_state_province=user_in.billing_state_province,
         billing_zip=user_in.billing_zip,
         billing_country=user_in.billing_country,
-        account_status="pending_approval",
-        approved=False
+        account_status=account_status,
+        approved=auto_approve,
     )
-    
+
+    now = datetime.utcnow().isoformat()
     user_doc = {
         "email": user_in.email,
         "user": user_db.model_dump(),
         "hashed_password": get_password_hash(user_in.password),
-        "account_status": "pending_approval",
-        "approved": False,
+        "account_status": account_status,
+        "approved": auto_approve,
         "spire_match_found": bool(spire_customer),
         "registration_payload": user_in.model_dump(exclude={"password", "confirm_password"}),
-        "created_at": datetime.utcnow().isoformat(),
-        "updated_at": datetime.utcnow().isoformat()
+        "created_at": now,
+        "updated_at": now,
     }
-    
+    if auto_approve:
+        user_doc["approved_at"] = now
+
     await db["users"].insert_one(user_doc)
+
+    # For auto-approved (existing) customers, sync their web-entered contact/address
+    # info into the matched Spire customer record, same as a manual approval would.
+    if auto_approve:
+        try:
+            await spire_client.update_customer(spire_customer_no, build_spire_customer_update_payload(user_in))
+        except Exception as e:
+            print(f"Could not sync web profile to Spire for {spire_customer_no}: {e}")
+        await sync_spire_internal_customer_id(user_doc, user_db.model_dump(), spire_customer_no)
 
     return user_db
 
