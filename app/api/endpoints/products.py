@@ -232,7 +232,7 @@ def apply_review_summary(record: dict, summary_map: dict):
     record["rating"] = summary["rating"]
     record["reviews"] = summary["reviews"]
 
-def normalize_product_data(record: dict, request: Request = None, customer_pricing: dict = None, is_authenticated: bool = True, metadata: dict = None) -> dict:
+def normalize_product_data(record: dict, request: Request = None, customer_pricing: dict = None, is_authenticated: bool = True, metadata: dict = None, customer_price_rule: dict = None) -> dict:
     inv = record.get("inventory", {})
     
     # Unificamos ambas listas de imágenes para nunca perder las del inventario base
@@ -391,11 +391,25 @@ def normalize_product_data(record: dict, request: Request = None, customer_prici
         record["sale_price"] = special_price
         # Set on_sale to ensure the UI badges it properly
         record["on_sale"] = True
-        
+
         # Try to calculate list_price for the strikethrough if not already there
         if "list_price" not in record:
             if sell_prices and len(sell_prices) > 0:
                 record["list_price"] = sell_prices[0]
+    elif customer_price_rule:
+        # Customer-wide price rule (e.g. Margin X% over current cost) applies to all
+        # of this customer's products. Compute the price from the item's cost and set
+        # it as the customer's normal price (no "sale" badge).
+        cost_field = {"C": "currentCost", "A": "averageCost", "S": "standardCost"}.get(
+            customer_price_rule.get("cost_method", "C"), "currentCost"
+        )
+        cost = record.get(cost_field)
+        if cost in (None, "", 0):
+            cost = inv.get(cost_field)
+        computed_price = spire_client.price_from_rule(cost, customer_price_rule)
+        if computed_price is not None:
+            record["price"] = computed_price
+            record["pricing"] = {measure_code: {"sellPrices": [computed_price]}}
 
     return record
 
@@ -418,9 +432,12 @@ async def get_products(
     
     db = get_database()
     customer_pricing = {}
+    customer_price_rule = None
     if current_user and current_user.spire_customer_no:
-        customer_pricing = await spire_client.get_customer_all_pricing(current_user.spire_customer_no)
-    
+        pricing_ctx = await spire_client.get_customer_pricing_context(current_user.spire_customer_no)
+        customer_pricing = pricing_ctx["fixed"]
+        customer_price_rule = pricing_ctx["rule"]
+
     if on_sale:
         deals = await spire_client.get_deals()
         # Filter out deals with '*' or 'discontinued' in the description
@@ -434,7 +451,7 @@ async def get_products(
 
         for d in deals:
             sku = d.get("partNo") or d.get("inventory", {}).get("partNo") or d.get("id")
-            normalize_product_data(d, request, customer_pricing, is_authenticated=bool(current_user), metadata=metadata_map.get(sku))
+            normalize_product_data(d, request, customer_pricing, is_authenticated=bool(current_user), metadata=metadata_map.get(sku), customer_price_rule=customer_price_rule)
             apply_review_summary(d, review_summary_map)
             
         # Pagination for deals (limit 0 means all)
@@ -493,7 +510,7 @@ async def get_products(
             meta = metadata_map.get(actual_part_no)
             cats = meta.get("subcategories", []) if meta else []
             
-            normalize_product_data(record, request, customer_pricing, is_authenticated=bool(current_user), metadata=meta)
+            normalize_product_data(record, request, customer_pricing, is_authenticated=bool(current_user), metadata=meta, customer_price_rule=customer_price_rule)
             apply_review_summary(record, review_summary_map)
             
             # Lógica de filtrado en memoria
@@ -617,20 +634,14 @@ async def get_product(product_id: str, request: Request, current_user: Optional[
         raise HTTPException(status_code=404, detail="Product not found")
 
     db = get_database()
-    
+
     customer_pricing = {}
+    customer_price_rule = None
     if current_user and current_user.spire_customer_no:
         try:
-            actual_part_no = product.get("partNo") or product.get("inventory", {}).get("partNo") or product_id
-            
-            # We can use get_customer_pricing for single product optimization or just pull it
-            pricing_data = await spire_client.get_customer_pricing(current_user.spire_customer_no, actual_part_no)
-            records = pricing_data.get("records", []) if isinstance(pricing_data, dict) else (pricing_data if isinstance(pricing_data, list) else [])
-            if records and len(records) > 0:
-                record = records[0]
-                amount = record.get("amount") if record.get("amount") is not None else record.get("price")
-                if amount is not None:
-                    customer_pricing[actual_part_no] = float(amount)
+            pricing_ctx = await spire_client.get_customer_pricing_context(current_user.spire_customer_no)
+            customer_pricing = pricing_ctx["fixed"]
+            customer_price_rule = pricing_ctx["rule"]
         except Exception:
             pass
 
@@ -638,7 +649,7 @@ async def get_product(product_id: str, request: Request, current_user: Optional[
     # Buscar metadata individual
     metadata = await db["products_metadata"].find_one({"sku": actual_part_no})
 
-    normalized = normalize_product_data(product, request, customer_pricing, is_authenticated=bool(current_user), metadata=metadata)
+    normalized = normalize_product_data(product, request, customer_pricing, is_authenticated=bool(current_user), metadata=metadata, customer_price_rule=customer_price_rule)
     review_summary_map = await get_review_summary_map(db, [str(actual_part_no)])
     apply_review_summary(normalized, review_summary_map)
     return normalized

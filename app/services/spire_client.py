@@ -277,6 +277,82 @@ class SpireClient:
         filter_query = json.dumps({"customerNo": customer_no, "partNo": product_id})
         return await self._request("GET", "inventory/price_matrix/", params={"filter": filter_query})
 
+    @staticmethod
+    def price_from_rule(cost, rule) -> "float | None":
+        """Compute a price from the customer's price-matrix rule and the item cost.
+
+        Margin:  price = cost / (1 - margin%/100)
+        Markup:  price = cost * (1 + markup%/100)
+        """
+        if not rule:
+            return None
+        try:
+            cost = float(cost)
+        except (TypeError, ValueError):
+            return None
+        if cost <= 0:
+            return None
+        try:
+            value = float(rule.get("value") or 0.0)
+        except (TypeError, ValueError):
+            value = 0.0
+        rule_type = rule.get("type")
+        if rule_type == "M":  # Margin
+            if value >= 100:
+                return None
+            return round(cost / (1.0 - value / 100.0), 2)
+        if rule_type == "K":  # Markup
+            return round(cost * (1.0 + value / 100.0), 2)
+        return None
+
+    @staticmethod
+    def _extract_customer_price_rule(records) -> "dict | None":
+        """A customer-wide price rule (no part / product code / group) applies to ALL
+        of that customer's items — e.g. 'Margin X% over current cost'."""
+        for record in records or []:
+            if not isinstance(record, dict):
+                continue
+            if record.get("partNo") or record.get("productCode") or record.get("inventoryGroupNo"):
+                continue
+            amount_type = str(record.get("amountType") or "").strip().upper()
+            if amount_type not in ("M", "K"):  # M = Margin, K = Markup
+                continue
+            try:
+                value = float(record.get("amount") or 0)
+            except (TypeError, ValueError):
+                value = 0.0
+            return {
+                "type": amount_type,
+                "value": value,
+                "cost_method": str(record.get("costMethod") or "C").strip().upper(),
+            }
+        return None
+
+    async def get_customer_pricing_context(self, customer_no: str) -> dict:
+        """Returns {"fixed": {partNo: price}, "rule": <customer-wide margin/markup rule>}."""
+        if not customer_no:
+            return {"fixed": {}, "rule": None}
+        filter_query = json.dumps({"customerNo": customer_no})
+        res = await self._request("GET", "inventory/price_matrix/", params={"filter": filter_query, "limit": 0})
+        records = res.get("records", []) if isinstance(res, dict) else []
+        fixed = {}
+        for record in records:
+            part_no = record.get("partNo")
+            if not part_no:
+                continue
+            amount_type = str(record.get("amountType") or "").strip().upper()
+            if amount_type in ("M", "K"):
+                continue  # per-part margin/markup not handled as a fixed price
+            amount = record.get("amount")
+            if amount is None:
+                amount = record.get("price")
+            if amount is not None:
+                try:
+                    fixed[part_no] = float(amount)
+                except (TypeError, ValueError):
+                    pass
+        return {"fixed": fixed, "rule": self._extract_customer_price_rule(records)}
+
     async def get_customer_all_pricing(self, customer_no: str):
         # Obtiene todas las reglas de precios especiales para un cliente
         filter_query = json.dumps({"customerNo": customer_no})
