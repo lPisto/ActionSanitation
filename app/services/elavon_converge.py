@@ -11,7 +11,27 @@ def _clean(value: Optional[str]) -> str:
     return str(value or "").strip()
 
 
+def converge_proxy_configured() -> bool:
+    """When set, Converge calls go through the static-IP proxy (cPanel) instead of
+    hitting Converge directly — needed because Vercel's egress IP is dynamic."""
+    return bool(_clean(getattr(settings, "CONVERGE_PROXY_URL", "")))
+
+
+def converge_proxy_base_url() -> str:
+    return _clean(getattr(settings, "CONVERGE_PROXY_URL", "")).rstrip("/")
+
+
+def _proxy_headers() -> dict:
+    return {
+        "Content-Type": "application/json",
+        "X-Proxy-Secret": _clean(getattr(settings, "CONVERGE_PROXY_SECRET", "")),
+    }
+
+
 def converge_hpp_configured() -> bool:
+    # Configured either via the static-IP proxy, or with local credentials.
+    if converge_proxy_configured():
+        return True
     return bool(
         _clean(settings.ELAVON_CONVERGE_ACCOUNT_ID)
         and _clean(settings.ELAVON_CONVERGE_USER_ID)
@@ -95,6 +115,33 @@ async def create_converge_hpp_token(
     if not converge_hpp_configured():
         raise RuntimeError("Converge HPP credentials are not configured.")
 
+    # Route through the static-IP proxy (cPanel) when configured.
+    if converge_proxy_configured():
+        async with httpx.AsyncClient(timeout=35) as client:
+            response = await client.post(
+                f"{converge_proxy_base_url()}/converge/token",
+                json={
+                    "amount": float(amount),
+                    "local_order_id": local_order_id,
+                    "customer_email": customer_email,
+                    "billing": billing_address_details or {},
+                    "success_url": frontend_success_url,
+                    "cancel_url": frontend_cancel_url,
+                },
+                headers=_proxy_headers(),
+            )
+        if response.status_code != 200:
+            detail = ""
+            try:
+                detail = (response.json() or {}).get("message") or response.text
+            except Exception:
+                detail = response.text
+            raise RuntimeError(f"Converge token error (via proxy): {response.status_code} {detail}")
+        token = _clean((response.json() or {}).get("token"))
+        if not token:
+            raise RuntimeError("Converge token error (via proxy): empty token")
+        return token
+
     billing = billing_address_details or {}
     name = _clean(billing.get("name"))
     first_name = ""
@@ -154,6 +201,28 @@ async def query_converge_transaction(txn_id: Optional[str]) -> Optional[dict]:
     txn_id = _clean(txn_id)
     if not txn_id or not converge_hpp_configured():
         return None
+
+    if converge_proxy_configured():
+        try:
+            async with httpx.AsyncClient(timeout=35) as client:
+                response = await client.post(
+                    f"{converge_proxy_base_url()}/converge/txnquery",
+                    json={"txn_id": txn_id},
+                    headers=_proxy_headers(),
+                )
+            if response.status_code != 200:
+                return None
+            data = response.json() or {}
+        except Exception as exc:
+            print(f"Converge txnquery via proxy failed: {exc}")
+            return None
+        if not data:
+            return None
+        data["id"] = data.get("ssl_txn_id") or txn_id
+        data["amount"] = data.get("ssl_amount")
+        data["status"] = "APPROVED" if data.get("ssl_result") == "0" else "DECLINED"
+        data["state"] = data["status"]
+        return data
 
     fields = {
         **converge_credentials(),

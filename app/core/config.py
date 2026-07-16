@@ -25,6 +25,9 @@ class Settings(BaseSettings):
     ELAVON_CONVERGE_USER_ID: str = ""
     ELAVON_CONVERGE_PIN: str = ""
     ELAVON_CONVERGE_VENDOR_ID: str = ""
+    # Static-IP proxy (cPanel) used to reach Converge from a whitelisted IP.
+    CONVERGE_PROXY_URL: str = ""
+    CONVERGE_PROXY_SECRET: str = ""
     
     SECRET_KEY: str
     ALGORITHM: str = "HS256"
