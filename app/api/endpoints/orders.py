@@ -933,6 +933,38 @@ async def create_order(order: OrderCreate, current_user: UserInDB = Depends(get_
     if free_tshirt_item:
         source_items_for_order.append(free_tshirt_item)
 
+    # Availability + warehouse routing: block ONLY when an item has 0 available across
+    # ALL warehouses. If any warehouse has stock, fulfill the line from that warehouse
+    # (so items inactive/0 in the default warehouse still ship from wherever they're
+    # stocked). This makes availability deterministic and lets Spire accept the order.
+    item_fulfill_whse = {}  # partNo -> warehouse code to ship this line from
+    out_of_stock_names = []
+    for item in source_items_for_order:
+        if item_field(item, "is_free_tshirt", False):
+            continue
+        part = item_field(item, "sku") or item_field(item, "product_id")
+        if not part:
+            continue
+        try:
+            stock_info = await spire_client.get_item_stock_info(part)
+        except Exception:
+            stock_info = None
+        if stock_info is None:
+            continue  # part not found in Spire inventory — let Spire decide
+        if stock_info["total"] <= 0:
+            out_of_stock_names.append(str(item_field(item, "name") or part))
+        elif stock_info["fulfill_whse"]:
+            item_fulfill_whse[str(part)] = stock_info["fulfill_whse"]
+    if out_of_stock_names:
+        names = ", ".join(out_of_stock_names)
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                f"Out of stock: {names}. "
+                f"Please remove {'it' if len(out_of_stock_names) == 1 else 'them'} from your cart and try again."
+            ),
+        )
+
     if not existing_order:
         now = datetime.utcnow().isoformat()
         initial_status = "ERP Pending"
@@ -1000,14 +1032,20 @@ async def create_order(order: OrderCreate, current_user: UserInDB = Depends(get_
         use_billing_defaults=bool(current_user.billing_street_address),
     )
 
-    spire_items = [
-        {
-            "partNo": item_field(item, "sku") or item_field(item, "product_id"),
+    spire_items = []
+    for item in source_items_for_order:
+        part_no = item_field(item, "sku") or item_field(item, "product_id")
+        line = {
+            "partNo": part_no,
             "description": str(item_field(item, "name", ""))[:40],
             "orderQty": item_field(item, "quantity", 1),
-            "unitPrice": str(item_field(item, "price", 0))
-        } for item in source_items_for_order
-    ]
+            "unitPrice": str(item_field(item, "price", 0)),
+        }
+        # Ship the line from a warehouse that actually has stock (chosen above).
+        fulfill_whse = item_fulfill_whse.get(str(part_no))
+        if fulfill_whse:
+            line["whse"] = fulfill_whse
+        spire_items.append(line)
 
     freight_part_no = os.getenv("SPIRE_FREIGHT_PART_NO", "").strip()
     if shipping_cost > 0 and freight_part_no:

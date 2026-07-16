@@ -394,6 +394,53 @@ class SpireClient:
                 
         return valid_deals
         
+    async def get_item_stock_info(self, part_no: str, preferred_warehouse: str = "00") -> "dict | None":
+        """Stock info for a part across ALL warehouses.
+
+        Returns {"total": float, "warehouses": {whse: qty}, "fulfill_whse": code|None}
+        where fulfill_whse is the warehouse to ship from: the preferred one if it has
+        stock, otherwise the warehouse with the most available stock. Returns None if
+        the part isn't found anywhere.
+        """
+        if not part_no:
+            return None
+        try:
+            res = await self._request("GET", "inventory/items/", params={"q": part_no, "limit": 0})
+        except Exception:
+            return None
+        records = res.get("records", []) if isinstance(res, dict) else []
+        matched = [r for r in records if str(r.get("partNo")) == str(part_no)]
+        if not matched:
+            return None
+
+        warehouses: dict = {}
+        for record in matched:
+            whse = str(record.get("whse") or "")
+            try:
+                qty = float(record.get("availableQty") or 0)
+            except (TypeError, ValueError):
+                qty = 0.0
+            warehouses[whse] = warehouses.get(whse, 0.0) + qty
+
+        total = sum(warehouses.values())
+        fulfill_whse = None
+        if warehouses.get(preferred_warehouse, 0.0) > 0:
+            fulfill_whse = preferred_warehouse
+        else:
+            in_stock = {w: q for w, q in warehouses.items() if q > 0}
+            if in_stock:
+                fulfill_whse = max(in_stock, key=in_stock.get)
+        return {"total": total, "warehouses": warehouses, "fulfill_whse": fulfill_whse}
+
+    async def get_item_availability(self, part_no: str, warehouse: str = None):
+        """Total available across all warehouses (or a specific one). None if not found."""
+        info = await self.get_item_stock_info(part_no)
+        if info is None:
+            return None
+        if warehouse:
+            return info["warehouses"].get(str(warehouse))
+        return info["total"]
+
     async def create_sales_order(self, order_data: dict):
         return await self._request("POST", "sales/orders/", json=order_data)
 
