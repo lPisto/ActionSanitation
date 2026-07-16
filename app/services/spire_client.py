@@ -217,6 +217,23 @@ class SpireClient:
         )
         return self._parse_bool(self._lookup_named_value(customer or {}, field_names))
 
+    def customer_payment_terms(self, customer: dict) -> str:
+        terms = (customer or {}).get("paymentTerms")
+        if isinstance(terms, dict):
+            return str(terms.get("description") or terms.get("code") or "").strip()
+        return str(terms or "").strip()
+
+    def customer_terms_are_cod(self, customer: dict) -> bool:
+        """True when the customer's Spire terms mean payment is due on delivery/receipt
+        (COD, cash on delivery, due/upon receipt, prepaid) rather than net/on-account."""
+        terms = self.customer_payment_terms(customer).lower()
+        if not terms:
+            return False
+        return any(
+            keyword in terms
+            for keyword in ("cod", "c.o.d", "cash on delivery", "on delivery", "on receipt", "upon receipt", "prepaid")
+        )
+
     def customer_ship_code(self, customer: dict) -> str:
         value = self._lookup_named_value(
             customer or {},

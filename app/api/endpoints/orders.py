@@ -193,11 +193,13 @@ def build_spire_address(
 
     return {key: value for key, value in address.items() if value}
 
-def payment_status_for(method: str) -> str:
-    if method in COD_PAYMENT_METHODS:
-        return "Payment Due on Delivery"
+def payment_status_for(method: str, cod_terms: bool = False) -> str:
     if method == "e_transfer":
         return "E-Transfer Pending"
+    if method in COD_PAYMENT_METHODS:
+        # "Payment Due on Delivery" only for COD / due-on-receipt customers.
+        # Net-terms (on account) customers get a neutral "On Account" status.
+        return "Payment Due on Delivery" if cod_terms else "On Account"
     return "Paid"
 
 def provider_for(method: str) -> str:
@@ -376,17 +378,19 @@ async def user_has_free_delivery(current_user: Optional[UserInDB]) -> bool:
 
 async def get_customer_shipping_settings(current_user: Optional[UserInDB]) -> dict:
     if not current_user:
-        return {"free_delivery": False, "ship_code": ""}
+        return {"free_delivery": False, "ship_code": "", "cod_terms": False}
 
     free_delivery = bool(getattr(current_user, "free_delivery", False))
     ship_code = ""
+    cod_terms = False
     try:
         customer = await spire_client.get_customer(current_user.spire_customer_no)
         free_delivery = free_delivery or spire_client.customer_has_free_delivery(customer)
         ship_code = spire_client.customer_ship_code(customer)
+        cod_terms = spire_client.customer_terms_are_cod(customer)
     except Exception as e:
         print(f"Could not check shipping settings for {current_user.spire_customer_no}: {e}")
-    return {"free_delivery": free_delivery, "ship_code": ship_code}
+    return {"free_delivery": free_delivery, "ship_code": ship_code, "cod_terms": cod_terms}
 
 def valid_order_identifier(*values) -> Optional[str]:
     invalid = {"", "PENDING", "UNKNOWN", "NONE", "NULL"}
@@ -415,8 +419,8 @@ def spire_fallback_payload(
         "shippingCarrier",
     ]
     fallback = {key: order_data[key] for key in allowed_keys if key in order_data}
-    if include_freight and "freightAmount" in order_data:
-        fallback["freightAmount"] = order_data["freightAmount"]
+    if include_freight and "freight" in order_data:
+        fallback["freight"] = order_data["freight"]
     return fallback
 
 async def create_spire_order_with_fallback(order_data: dict) -> dict:
@@ -435,7 +439,7 @@ async def create_spire_order_with_fallback(order_data: dict) -> dict:
     try:
         return await spire_client.create_sales_order(minimal_fallback)
     except HTTPException as third_error:
-        print(f"Spire minimal order payload failed, retrying without freightAmount: {third_error.detail}")
+        print(f"Spire minimal order payload failed, retrying without freight: {third_error.detail}")
 
     fallback_without_freight = spire_fallback_payload(order_data, include_freight=False, include_note_aliases=False)
     return await spire_client.create_sales_order(fallback_without_freight)
@@ -767,6 +771,7 @@ async def create_order(order: OrderCreate, current_user: UserInDB = Depends(get_
     )
     shipping_settings = await get_customer_shipping_settings(current_user)
     free_delivery = shipping_settings["free_delivery"]
+    cod_terms = shipping_settings.get("cod_terms", False)
     money = resolve_order_money(order, existing_order, source_items)
     shipping_cost = money["shipping_cost"]
     tax_amount = money["tax_amount"]
@@ -932,7 +937,7 @@ async def create_order(order: OrderCreate, current_user: UserInDB = Depends(get_
         now = datetime.utcnow().isoformat()
         initial_status = "ERP Pending"
         if order.payment_method in COD_PAYMENT_METHODS:
-            initial_status = "Payment Due on Delivery"
+            initial_status = payment_status_for(order.payment_method, cod_terms)
         elif order.payment_method == "e_transfer":
             initial_status = "E-Transfer Pending"
 
@@ -1038,7 +1043,7 @@ async def create_order(order: OrderCreate, current_user: UserInDB = Depends(get_
         "billingAddress": billing_spire_address,
         "referenceNo": spire_reference_no,
         "shippingCarrier": order.shipping_method[:15] if order.shipping_method else "",
-        "freightAmount": shipping_cost,
+        "freight": shipping_cost,
     }
 
     if existing_order and existing_order.get("items") and not free_tshirt_item:
@@ -1079,10 +1084,11 @@ async def create_order(order: OrderCreate, current_user: UserInDB = Depends(get_
         # Registra el error detallado en la consola del backend
         print(f"Spire ERP Error details: {e.detail}")
 
-        # Spire rejects the whole order if any line item is inactive/unavailable.
-        # Give the customer a clear, actionable message naming the offending item.
+        # Spire rejects the whole order if a line item's inventory is inactive.
+        # Match this SPECIFIC error only (not other "inactive" errors like codes),
+        # and name the offending item so the customer knows which one to remove.
         error_detail = str(e.detail)
-        if "inactive" in error_detail.lower():
+        if "inventory is inactive" in error_detail.lower():
             offending_part = ""
             if "/" in error_detail:
                 tail = error_detail.split("/")[-1]
@@ -1174,7 +1180,7 @@ async def create_order(order: OrderCreate, current_user: UserInDB = Depends(get_
             "free_tshirt_claimed": free_tshirt_claimed,
             "converge_txn_id": order.stripe_payment_intent_id,
             "payment_session_id": order.payment_session_id or (existing_order or {}).get("payment_session_id"),
-            "status": payment_status_for(order.payment_method),
+            "status": payment_status_for(order.payment_method, cod_terms),
             "provider": provider_for(order.payment_method),
             "updated_at": datetime.utcnow().isoformat()
         }},
@@ -1212,7 +1218,7 @@ async def create_order(order: OrderCreate, current_user: UserInDB = Depends(get_
 
     return {
         "order_id": spire_order_no,
-        "status": payment_status_for(order.payment_method),
+        "status": payment_status_for(order.payment_method, cod_terms),
         "total_amount": total_amount
     }
 
@@ -1233,16 +1239,21 @@ async def get_order_history(request: Request, current_user: UserInDB = Depends(g
     async def build_item_snapshot(part_no: str, quantity=1, price=0.0, description: Optional[str] = None, local_match: Optional[dict] = None):
         local_match = local_match or {}
         name = description or local_match.get("name") or part_no
-        image = local_match.get("image")
         is_dangerous_good = local_match.get("is_dangerous_good", False)
 
-        if part_no and (not image or not name or name == part_no):
+        # Always use the stable image-proxy URL for the CURRENT host (keyed by SKU) so
+        # order/repeat-order thumbnails don't break from stale or absolute URLs saved on
+        # older orders. If the product has no image the proxy errors and the frontend
+        # shows the branded fallback.
+        base_url = str(request.base_url).rstrip("/") if request else ""
+        image = f"{base_url}/api/products/{part_no}/image?no_bg=true" if (base_url and part_no) else local_match.get("image")
+
+        if part_no and (not name or name == part_no):
             try:
                 from app.api.endpoints.products import normalize_product_data
                 product = await spire_client.get_product(part_no)
                 product = normalize_product_data(product, request)
-                name = name if name and name != part_no else product.get("description") or part_no
-                image = image or product.get("image")
+                name = product.get("description") or part_no
                 is_dangerous_good = product.get("is_dangerous_good", is_dangerous_good)
             except Exception:
                 pass
