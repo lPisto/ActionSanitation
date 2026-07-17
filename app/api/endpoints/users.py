@@ -15,6 +15,26 @@ async def read_users_me(current_user: UserInDB = Depends(get_current_user)):
         print(f"Could not refresh free delivery flag for {current_user.spire_customer_no}: {e}")
     return current_user
 
+@router.get("/me/ship-to")
+async def read_ship_to_addresses(current_user: UserInDB = Depends(get_current_user)):
+    """Ship-to (delivery) locations for the customer. For consolidated dealer accounts
+    (one billing account, many dealerships) this returns all locations so the customer
+    can pick where an order ships. Returns [] on error or single-location accounts."""
+    assigned_code = (getattr(current_user, "assigned_ship_to_code", None) or "").strip()
+    try:
+        addresses = await spire_client.get_customer_addresses(current_user.spire_customer_no)
+    except Exception as e:
+        print(f"Could not load ship-to addresses for {current_user.spire_customer_no}: {e}")
+        return {"addresses": [], "consolidated": False, "assigned": assigned_code or None}
+    # Ship-to locations are the ones with a shipId code; the blank one is the billing/main address.
+    ship_to = [a for a in addresses if a.get("ship_id")]
+    # A dealership sub-account is locked to its assigned location.
+    if assigned_code:
+        locked = [a for a in ship_to if a.get("ship_id") == assigned_code]
+        if locked:
+            return {"addresses": locked, "consolidated": False, "assigned": assigned_code, "locked": True}
+    return {"addresses": ship_to, "consolidated": len(ship_to) > 1, "assigned": assigned_code or None}
+
 @router.put("/me", response_model=UserInDB)
 async def update_user_me(user_update: UserUpdate, current_user: UserInDB = Depends(get_current_user)):
     # 1. Update Spire ERP

@@ -11,7 +11,7 @@ import secrets
 import re
 from datetime import datetime, timedelta
 from pydantic import BaseModel
-from app.services.email_service import send_password_reset_email
+from app.services.email_service import send_password_reset_email, send_pending_account_notification
 from typing import Optional
 
 router = APIRouter()
@@ -34,6 +34,11 @@ class AccountApprovalRequest(BaseModel):
     spire_customer_no: Optional[str] = None
     create_spire_customer: bool = False
     approved: bool = True
+    # Consolidated dealer sub-account: assign this user to one ship-to (dealership)
+    # under a shared parent Spire customer. When set, multiple users may share the
+    # same Spire customer number (each dealership sees only its own orders).
+    ship_to_code: Optional[str] = None
+    ship_to_name: Optional[str] = None
 
 class ImpersonateRequest(BaseModel):
     email: Optional[str] = None
@@ -124,6 +129,8 @@ def summarize_user_record(record: dict) -> dict:
         "spire_customer_no": user.get("spire_customer_no"),
         "internal_customer_id": user.get("internal_customer_id") or user.get("id"),
         "free_delivery": bool(user.get("free_delivery", False)),
+        "assigned_ship_to_code": user.get("assigned_ship_to_code"),
+        "assigned_ship_to_name": user.get("assigned_ship_to_name"),
         "account_status": account_status,
         "approved": bool(approved),
         "spire_match_found": record.get("spire_match_found", False),
@@ -230,6 +237,17 @@ async def register(user_in: UserCreate):
 
     await db["users"].insert_one(user_doc)
 
+    # Alert staff when a NEW customer needs manual approval (not auto-approved).
+    if not auto_approve:
+        try:
+            await send_pending_account_notification(
+                name=f"{user_in.first_name} {user_in.last_name}".strip(),
+                email=user_in.email,
+                company=user_in.company or "",
+            )
+        except Exception as e:
+            print(f"Could not send pending-account alert: {e}")
+
     # For auto-approved (existing) customers, sync their web-entered contact/address
     # info into the matched Spire customer record, same as a manual approval would.
     if auto_approve:
@@ -277,8 +295,26 @@ async def approve_account(req: AccountApprovalRequest, x_admin_token: Optional[s
     existing_spire_customer_no = (user_doc.get("spire_customer_no") or "").strip()
     target_customer_no = requested_spire_customer_no or existing_spire_customer_no
 
-    # Guard: never let two different accounts point at the same Spire customer.
-    if target_customer_no:
+    ship_to_code = (req.ship_to_code or "").strip()
+    ship_to_name = (req.ship_to_name or "").strip()
+
+    # Consolidated dealer sub-accounts: a parent Spire customer with many ship-to
+    # locations may have MANY web users (one per dealership). We allow multiple web
+    # accounts on the same Spire customer when a ship-to is assigned, or when the
+    # Spire customer has more than one ship-to address. Otherwise keep the one-to-one
+    # guard that prevents accidental duplicates.
+    is_consolidated_sub_account = bool(ship_to_code)
+    if target_customer_no and not is_consolidated_sub_account:
+        try:
+            addresses = await spire_client.get_customer_addresses(target_customer_no)
+            if len([a for a in addresses if a.get("ship_id")]) > 1:
+                is_consolidated_sub_account = True
+        except Exception:
+            pass
+
+    # Guard: for normal (non-consolidated) accounts, never let two accounts point at
+    # the same Spire customer.
+    if target_customer_no and not is_consolidated_sub_account:
         duplicate = await db["users"].find_one({
             "email": {"$ne": req.email},
             "user.spire_customer_no": target_customer_no,
@@ -289,7 +325,8 @@ async def approve_account(req: AccountApprovalRequest, x_admin_token: Optional[s
                 status_code=409,
                 detail=(
                     f"Spire customer {target_customer_no} is already linked to another approved "
-                    f"account ({duplicate.get('email')}). Each Spire customer can only be linked once."
+                    f"account ({duplicate.get('email')}). Each Spire customer can only be linked once "
+                    f"(unless this is a consolidated dealer account — assign a ship-to location)."
                 ),
             )
 
@@ -338,10 +375,21 @@ async def approve_account(req: AccountApprovalRequest, x_admin_token: Optional[s
         # Existing customer → push the web-entered contact/address info to Spire.
         sync_web_info_to_spire = True
 
-    # Sync the web-entered profile (name, email, phone, address) into the existing
-    # Spire customer record so approving reflects the latest info the customer gave.
+    # Resolve the ship-to name from the customer's Spire addresses if only a code was given.
+    if ship_to_code and not ship_to_name:
+        try:
+            for addr in await spire_client.get_customer_addresses(spire_customer_no):
+                if addr.get("ship_id") == ship_to_code:
+                    ship_to_name = addr.get("name") or ""
+                    break
+        except Exception:
+            pass
+
+    # Sync the web-entered profile into the Spire customer — but NOT for consolidated
+    # dealer sub-accounts (many users share one parent Spire customer; syncing each
+    # user's info would overwrite the parent's record).
     web_info_sync = None
-    if sync_web_info_to_spire:
+    if sync_web_info_to_spire and not is_consolidated_sub_account:
         try:
             await spire_client.update_customer(spire_customer_no, build_spire_customer_update_payload(user_in))
             web_info_sync = {"synced": True}
@@ -353,6 +401,8 @@ async def approve_account(req: AccountApprovalRequest, x_admin_token: Optional[s
     user_doc["internal_customer_id"] = internal_customer_id_for(user_record, user_doc)
     user_doc["account_status"] = "approved"
     user_doc["approved"] = True
+    user_doc["assigned_ship_to_code"] = ship_to_code or None
+    user_doc["assigned_ship_to_name"] = ship_to_name or None
 
     internal_id_sync = await sync_spire_internal_customer_id(user_record, user_doc, spire_customer_no)
 
@@ -362,6 +412,8 @@ async def approve_account(req: AccountApprovalRequest, x_admin_token: Optional[s
             "user": user_doc,
             "account_status": "approved",
             "approved": True,
+            "assigned_ship_to_code": ship_to_code or None,
+            "assigned_ship_to_name": ship_to_name or None,
             "spire_internal_customer_id_sync": internal_id_sync,
             "spire_web_info_sync": web_info_sync,
             "approved_at": datetime.utcnow().isoformat(),

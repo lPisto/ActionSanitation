@@ -46,6 +46,7 @@ class Settings(BaseSettings):
     MAIL_STARTTLS: bool = True
     MAIL_SSL_TLS: bool = False
     SALES_EMAIL: str = ""
+    ADMIN_ALERT_EMAIL: str = ""  # where "account pending approval" alerts go (falls back to SALES_EMAIL)
 
     SSH_CPANEL_PASSWORD: str | None = None
     CPANEL_HOST: str | None = None

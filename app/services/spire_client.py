@@ -271,6 +271,35 @@ class SpireClient:
         customer_id = customer.get("id")
         return await self._request("PUT", f"customers/{customer_id}", json=customer_data)
 
+    async def get_customer_addresses(self, customer_no: str) -> list:
+        """All ship-to addresses for a customer (used by consolidated dealer accounts
+        that have one billing account and many delivery locations)."""
+        if not customer_no:
+            return []
+        customer = await self.get_customer(customer_no)
+        customer_id = customer.get("id")
+        if not customer_id:
+            return []
+        res = await self._request("GET", f"customers/{customer_id}/addresses/", params={"limit": 0})
+        records = res.get("records", []) if isinstance(res, dict) else (res or [])
+        addresses = []
+        for record in records:
+            if not isinstance(record, dict):
+                continue
+            addresses.append({
+                "id": record.get("id"),
+                "ship_id": (record.get("shipId") or "").strip(),
+                "name": (record.get("name") or "").strip(),
+                "line1": (record.get("line1") or "").strip(),
+                "line2": (record.get("line2") or "").strip(),
+                "city": (record.get("city") or "").strip(),
+                "prov_state": (record.get("provState") or "").strip(),
+                "postal_code": (record.get("postalCode") or "").strip(),
+                "country": (record.get("country") or "").strip(),
+                "email": (record.get("email") or "").strip(),
+            })
+        return addresses
+
     async def get_customer_pricing(self, customer_no: str, product_id: str):
         # Spire stores customer special pricing in the Inventory Price Matrix
         # You can filter by customer_no and part_no to get the specific negotiated price
@@ -414,6 +443,7 @@ class SpireClient:
             return None
 
         warehouses: dict = {}
+        allow_backorder = False
         for record in matched:
             whse = str(record.get("whse") or "")
             try:
@@ -421,6 +451,8 @@ class SpireClient:
             except (TypeError, ValueError):
                 qty = 0.0
             warehouses[whse] = warehouses.get(whse, 0.0) + qty
+            if self._parse_bool(record.get("allowBackorders") if record.get("allowBackorders") is not None else record.get("allowBackOrders")):
+                allow_backorder = True
 
         total = sum(warehouses.values())
         fulfill_whse = None
@@ -430,7 +462,7 @@ class SpireClient:
             in_stock = {w: q for w, q in warehouses.items() if q > 0}
             if in_stock:
                 fulfill_whse = max(in_stock, key=in_stock.get)
-        return {"total": total, "warehouses": warehouses, "fulfill_whse": fulfill_whse}
+        return {"total": total, "warehouses": warehouses, "fulfill_whse": fulfill_whse, "allow_backorder": allow_backorder}
 
     async def get_item_availability(self, part_no: str, warehouse: str = None):
         """Total available across all warehouses (or a specific one). None if not found."""

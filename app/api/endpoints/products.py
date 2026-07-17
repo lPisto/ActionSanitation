@@ -627,6 +627,56 @@ async def update_product_categories(
         "categories": categories,
     }
 
+class CurationUpdate(BaseModel):
+    new: Optional[List[str]] = None
+    popular: Optional[List[str]] = None
+    related: Optional[dict] = None  # { "SKU": ["SKU", ...] }
+
+
+def _clean_sku_list(values) -> List[str]:
+    out, seen = [], set()
+    for value in values or []:
+        cleaned = str(value or "").strip()
+        if cleaned and cleaned not in seen:
+            out.append(cleaned)
+            seen.add(cleaned)
+    return out
+
+
+@router.get("/curation")
+async def get_curation():
+    """Manually curated homepage sections. Empty lists mean 'use the automatic rules'."""
+    db = get_database()
+    doc = await db["site_config"].find_one({"_id": "curation"}) or {}
+    return {
+        "new": doc.get("new", []),
+        "popular": doc.get("popular", []),
+        "related": doc.get("related", {}),
+    }
+
+
+@router.patch("/admin/curation")
+async def update_curation(payload: CurationUpdate, x_admin_token: Optional[str] = Header(None)):
+    require_products_admin(x_admin_token)
+    db = get_database()
+    updates = {"updated_at": datetime.utcnow().isoformat()}
+    if payload.new is not None:
+        updates["new"] = _clean_sku_list(payload.new)
+    if payload.popular is not None:
+        updates["popular"] = _clean_sku_list(payload.popular)
+    if payload.related is not None:
+        related = {}
+        for sku, items in (payload.related or {}).items():
+            key = str(sku or "").strip()
+            cleaned = _clean_sku_list(items)
+            if key and cleaned:
+                related[key] = cleaned
+        updates["related"] = related
+    await db["site_config"].update_one({"_id": "curation"}, {"$set": updates}, upsert=True)
+    doc = await db["site_config"].find_one({"_id": "curation"}) or {}
+    return {"new": doc.get("new", []), "popular": doc.get("popular", []), "related": doc.get("related", {})}
+
+
 @router.get("/{product_id}")
 async def get_product(product_id: str, request: Request, current_user: Optional[UserInDB] = Depends(get_optional_current_user)):
     product = await spire_client.get_product(product_id)

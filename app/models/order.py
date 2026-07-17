@@ -34,6 +34,8 @@ class OrderCreate(BaseModel):
     po_number: Optional[str] = None
     order_notes: Optional[str] = None
     free_tshirt_size: Optional[str] = None
+    ship_to_code: Optional[str] = None   # Spire ship-to code (dealership) for consolidated accounts
+    ship_to_name: Optional[str] = None
     shipping_cost: Optional[float] = 0.0
     tax_amount: Optional[float] = 0.0
     total_amount: Optional[float] = None

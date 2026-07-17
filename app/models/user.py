@@ -59,6 +59,10 @@ class UserInDB(BaseModel):
     account_status: str = "approved"
     approved: bool = True
     free_delivery: Optional[bool] = False
+    # Consolidated dealer sub-accounts: this user is a single dealership under a shared
+    # parent Spire customer, tied to one ship-to location (sees only its own orders).
+    assigned_ship_to_code: Optional[str] = None
+    assigned_ship_to_name: Optional[str] = None
 
 class Token(BaseModel):
     access_token: str

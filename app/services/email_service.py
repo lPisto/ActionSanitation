@@ -91,6 +91,37 @@ async def send_email_via_graph(subject: str, recipients: list, html_content: str
                 print(f"Error sending email via MS Graph: {e}")
                 return
 
+async def send_pending_account_notification(name: str, email: str, company: str = ""):
+    """Alert staff that a new website account is awaiting admin approval."""
+    # Alerts go to the order mailbox (order@actionsanitationsupply.com = MAIL_FROM).
+    # ADMIN_ALERT_EMAIL can override the destination if ever needed.
+    recipient = (
+        getattr(settings, "ADMIN_ALERT_EMAIL", "")
+        or getattr(settings, "MAIL_FROM", "")
+        or getattr(settings, "SALES_EMAIL", "")
+    ).strip()
+    if not recipient:
+        print("No admin alert recipient configured; skipping pending-account email.")
+        return
+    html = f"""
+    <div style="font-family: Arial, sans-serif; max-width: 600px; margin: auto; color: #333;">
+        <h2 style="color: #175b1e;">New account pending approval</h2>
+        <p>A new website account was created and is waiting for approval in the admin panel.</p>
+        <p><strong>Name:</strong> {name or 'N/A'}<br>
+           <strong>Email:</strong> {email or 'N/A'}<br>
+           <strong>Company:</strong> {company or 'N/A'}</p>
+        <p>Review it under <strong>Admin → Pending Approvals</strong>.</p>
+    </div>
+    """
+    try:
+        await send_email_via_graph(
+            subject="New account pending approval — Action Sanitation",
+            recipients=[recipient],
+            html_content=html,
+        )
+    except Exception as e:
+        print(f"Could not send pending-account notification: {e}")
+
 async def send_contact_email(name: str, email: str, subject: str, message: str):
     html = f"""
     <b> New contact form submission from: </b><p> {name} ({email})</p>

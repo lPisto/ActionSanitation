@@ -235,6 +235,8 @@ def spire_order_notes(
     ship_address: Optional[dict] = None,
     bill_address: Optional[dict] = None,
     promo_note: str = "",
+    ship_to_label: str = "",
+    backorder_names: Optional[list] = None,
 ) -> str:
     """Build the Spire order note body.
 
@@ -246,6 +248,9 @@ def spire_order_notes(
     payment_note = payment_note_for(payment_method, total_amount, txn_id)
     if payment_note:
         pieces.append(payment_note)
+
+    if ship_to_label:
+        pieces.append(f"Ship-to location: {ship_to_label}")
 
     is_pickup = str(shipping_method or "").strip().lower() == "pickup"
     if is_pickup:
@@ -260,6 +265,8 @@ def spire_order_notes(
     if bill_line and bill_line.lower() != ship_line.lower():
         pieces.append(f"Bill to: {bill_line}")
 
+    if backorder_names:
+        pieces.append("Backordered (0 stock — will ship when available): " + ", ".join(backorder_names))
     if promo_note:
         pieces.append(promo_note)
     if customer_notes:
@@ -724,6 +731,32 @@ async def get_free_tshirt_promotion(current_user: Optional[UserInDB] = Depends(g
         "message": "Choose your size at checkout. One free T-shirt per customer on their first website order.",
     }
 
+class AvailabilityItem(BaseModel):
+    product_id: Optional[str] = None
+    sku: Optional[str] = None
+    name: Optional[str] = None
+    quantity: int = 1
+
+
+@router.post("/check-availability")
+async def check_availability(items: List[AvailabilityItem], current_user: UserInDB = Depends(get_current_user)):
+    """Non-blocking pre-checkout check. Flags items that are out of stock (0 across all
+    warehouses) so the customer sees a back-order notice before paying. Orders are never
+    blocked by this — it is informational only."""
+    backordered = []
+    for it in items or []:
+        part = (it.sku or it.product_id or "").strip()
+        if not part:
+            continue
+        try:
+            info = await spire_client.get_item_stock_info(part)
+        except Exception:
+            info = None
+        if info is not None and float(info.get("total") or 0) <= 0:
+            backordered.append({"sku": part, "name": it.name or part})
+    return {"backordered": backordered}
+
+
 @router.post("/", response_model=OrderResponse)
 async def create_order(order: OrderCreate, current_user: UserInDB = Depends(get_current_user)):
     total_amount = 0.0
@@ -868,6 +901,8 @@ async def create_order(order: OrderCreate, current_user: UserInDB = Depends(get_
         local_order_id = f"e_transfer_{datetime.utcnow().strftime('%Y%m%d%H%M%S%f')}"
     po_number = (order.po_number or "").strip() or (existing_order or {}).get("po_number")
     order_notes = (order.order_notes or "").strip() or (existing_order or {}).get("order_notes")
+    ship_to_code = (order.ship_to_code or "").strip() or (existing_order or {}).get("ship_to_code") or ""
+    ship_to_name = (order.ship_to_name or "").strip() or (existing_order or {}).get("ship_to_name") or ""
     shipping_address = order.shipping_address or (existing_order or {}).get("shipping_address") or ""
     shipping_address_details = preliminary_shipping_address_details
     billing_address_details = address_details_to_dict(order.billing_address_details) or (existing_order or {}).get("billing_address_details")
@@ -933,12 +968,12 @@ async def create_order(order: OrderCreate, current_user: UserInDB = Depends(get_
     if free_tshirt_item:
         source_items_for_order.append(free_tshirt_item)
 
-    # Availability + warehouse routing: block ONLY when an item has 0 available across
-    # ALL warehouses. If any warehouse has stock, fulfill the line from that warehouse
-    # (so items inactive/0 in the default warehouse still ship from wherever they're
-    # stocked). This makes availability deterministic and lets Spire accept the order.
-    item_fulfill_whse = {}  # partNo -> warehouse code to ship this line from
-    out_of_stock_names = []
+    # Warehouse routing (NON-blocking): orders MUST post to Spire regardless of stock —
+    # Spire owns the ship/backorder/charge process. We only pick a warehouse that has
+    # stock (so the line ships from where it's available); out-of-stock lines still go
+    # through and Spire records the backorder. Nothing here rejects the order.
+    item_fulfill_whse = {}       # partNo -> warehouse code to ship this line from
+    backordered_names = []       # informational only (surfaced in the order note)
     for item in source_items_for_order:
         if item_field(item, "is_free_tshirt", False):
             continue
@@ -951,19 +986,10 @@ async def create_order(order: OrderCreate, current_user: UserInDB = Depends(get_
             stock_info = None
         if stock_info is None:
             continue  # part not found in Spire inventory — let Spire decide
-        if stock_info["total"] <= 0:
-            out_of_stock_names.append(str(item_field(item, "name") or part))
-        elif stock_info["fulfill_whse"]:
+        if stock_info.get("fulfill_whse"):
             item_fulfill_whse[str(part)] = stock_info["fulfill_whse"]
-    if out_of_stock_names:
-        names = ", ".join(out_of_stock_names)
-        raise HTTPException(
-            status_code=400,
-            detail=(
-                f"Out of stock: {names}. "
-                f"Please remove {'it' if len(out_of_stock_names) == 1 else 'them'} from your cart and try again."
-            ),
-        )
+        elif stock_info["total"] <= 0:
+            backordered_names.append(str(item_field(item, "name") or part))
 
     if not existing_order:
         now = datetime.utcnow().isoformat()
@@ -1002,6 +1028,8 @@ async def create_order(order: OrderCreate, current_user: UserInDB = Depends(get_
                     "billing_address_details": billing_address_details,
                     "shipping_cost": shipping_cost,
                     "tax_amount": tax_amount,
+                    "ship_to_code": ship_to_code or None,
+                    "ship_to_name": ship_to_name or None,
                     "po_number": po_number,
                     "order_notes": order_notes,
                     "items": initial_items,
@@ -1025,6 +1053,9 @@ async def create_order(order: OrderCreate, current_user: UserInDB = Depends(get_
         current_user,
         use_billing_defaults=False,
     )
+    # Consolidated dealer accounts: link the order to the chosen Spire ship-to location.
+    if ship_to_code:
+        shipping_spire_address["shipId"] = ship_to_code[:20]
     billing_spire_address = build_spire_address(
         billing_address_details,
         resolve_billing_address(order.billing_address, shipping_address, existing_order),
@@ -1066,6 +1097,8 @@ async def create_order(order: OrderCreate, current_user: UserInDB = Depends(get_
         ship_address=shipping_spire_address,
         bill_address=billing_spire_address,
         promo_note=promo_note,
+        ship_to_label=(f"{ship_to_name} ({ship_to_code})" if ship_to_name and ship_to_code else (ship_to_name or ship_to_code)),
+        backorder_names=backordered_names,
     )
     staff_order_notes = " | ".join([note for note in (order_notes, promo_note) if note])[:500]
 
@@ -1154,6 +1187,8 @@ async def create_order(order: OrderCreate, current_user: UserInDB = Depends(get_
                     "billing_address_details": billing_address_details,
                     "shipping_cost": shipping_cost,
                     "tax_amount": tax_amount,
+                    "ship_to_code": ship_to_code or None,
+                    "ship_to_name": ship_to_name or None,
                     "po_number": po_number,
                     "order_notes": order_notes,
                     "items": saved_items,
@@ -1208,6 +1243,8 @@ async def create_order(order: OrderCreate, current_user: UserInDB = Depends(get_
             "shipping_address_details": shipping_address_details,
             "billing_address": billing_address,
             "billing_address_details": billing_address_details,
+            "ship_to_code": ship_to_code or None,
+            "ship_to_name": ship_to_name or None,
             "shipping_cost": shipping_cost,
             "tax_amount": tax_amount,
             "po_number": po_number,
@@ -1335,6 +1372,8 @@ async def get_order_history(request: Request, current_user: UserInDB = Depends(g
         shipping_addr = rec.get("shippingAddress", {})
         rec_copy["ship_to"] = shipping_addr.get("line1") or local_info.get("shipping_address") or ""
         rec_copy["shipping_city"] = shipping_addr.get("city") or ""
+        rec_copy["ship_to_name"] = local_info.get("ship_to_name") or shipping_addr.get("name") or ""
+        rec_copy["ship_to_code"] = local_info.get("ship_to_code") or shipping_addr.get("shipId") or ""
         rec_copy["created_at"] = local_info.get("created_at") or rec.get("orderDate") or ""
             
         # Extraemos los items combinando Spire (cantidades reales) y local (nombres que Spire no devuelve)
@@ -1392,6 +1431,8 @@ async def get_order_history(request: Request, current_user: UserInDB = Depends(g
             "total_amount": document_total(local),
             "ship_to": local.get("shipping_address") or details.get("line1") or "",
             "shipping_city": details.get("city") or "",
+            "ship_to_name": local.get("ship_to_name") or "",
+            "ship_to_code": local.get("ship_to_code") or "",
             "created_at": local.get("created_at") or local.get("updated_at") or "",
             "items": [
                 await build_item_snapshot(
@@ -1406,6 +1447,15 @@ async def get_order_history(request: Request, current_user: UserInDB = Depends(g
             ],
         })
         
+    # Consolidated dealer sub-accounts: restrict history to this user's own ship-to
+    # location (the parent Spire customer's orders include every dealership).
+    assigned_ship_to = (getattr(current_user, "assigned_ship_to_code", None) or "").strip()
+    if assigned_ship_to:
+        formatted_orders = [
+            o for o in formatted_orders
+            if str(o.get("ship_to_code") or "") == assigned_ship_to
+        ]
+
     formatted_orders.sort(key=lambda o: o.get("created_at") or o.get("orderDate") or "", reverse=True)
     return formatted_orders
 
