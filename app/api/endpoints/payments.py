@@ -1,6 +1,7 @@
 import httpx
 from fastapi import APIRouter, Depends, HTTPException, Request, Header
 from fastapi.responses import RedirectResponse
+from ipaddress import ip_address
 from urllib.parse import urlencode
 from pydantic import BaseModel
 from typing import Optional, List
@@ -8,8 +9,9 @@ from datetime import datetime
 from uuid import uuid4
 from app.core.config import settings
 from app.db.mongodb import get_database
-from app.api.deps import get_optional_current_user
+from app.api.deps import get_current_user, get_optional_current_user
 from app.models.user import UserInDB
+from app.models.order import OrderCreate
 from app.services.spire_client import spire_client
 from app.services.freightcom_client import quote_freightcom_shipping
 from app.services.shipping_rules import calculate_shipping_breakdown, items_total, requires_freightcom_quote, round_money
@@ -17,7 +19,9 @@ from app.services.elavon_converge import (
     converge_hpp_configured,
     converge_hpp_payment_url,
     converge_checkout_js_url,
+    converge_invoice_number,
     create_converge_hpp_token,
+    query_converge_transaction,
 )
 
 router = APIRouter()
@@ -30,6 +34,81 @@ def require_database():
     if db is None:
         raise HTTPException(status_code=503, detail="Database connection is not available.")
     return db
+
+
+async def finalize_confirmed_order_in_spire(order_doc: dict, txn_id: str) -> dict:
+    """Create the Spire order from the persisted checkout snapshot.
+
+    This is intentionally idempotent: the orders endpoint returns the existing Spire
+    order when the same local/transaction ID was already finalized by the browser.
+    """
+    if order_doc.get("spire_order_no") not in (None, "", "Pending", "UNKNOWN"):
+        return {"status": "already_finalized", "order_id": str(order_doc.get("spire_order_no"))}
+
+    db = require_database()
+    customer_email = normalize_address(order_doc.get("customer_email")).lower()
+    if not customer_email:
+        return {"status": "missing_customer"}
+
+    user_record = await db["users"].find_one({
+        "$or": [{"email": customer_email}, {"user.email": customer_email}]
+    })
+    if not user_record:
+        return {"status": "missing_customer"}
+
+    user_data = user_record.get("user") if isinstance(user_record.get("user"), dict) else user_record
+    try:
+        current_user = UserInDB(**user_data)
+        order_request = OrderCreate(
+            items=order_doc.get("items") or [],
+            shipping_address=order_doc.get("shipping_address") or "",
+            shipping_address_details=order_doc.get("shipping_address_details"),
+            billing_address=order_doc.get("billing_address"),
+            billing_address_details=order_doc.get("billing_address_details"),
+            shipping_method=order_doc.get("shipping_method"),
+            payment_method="credit_card",
+            stripe_payment_intent_id=txn_id,
+            local_order_id=order_doc.get("local_order_id") or order_doc.get("id"),
+            payment_session_id=order_doc.get("payment_session_id"),
+            po_number=order_doc.get("po_number"),
+            order_notes=order_doc.get("order_notes"),
+            free_tshirt_size=order_doc.get("free_tshirt_size"),
+            ship_to_code=order_doc.get("ship_to_code"),
+            ship_to_name=order_doc.get("ship_to_name"),
+            shipping_cost=order_doc.get("shipping_cost") or 0,
+            tax_amount=order_doc.get("tax_amount") or 0,
+            total_amount=order_doc.get("total_amount"),
+        )
+    except Exception as exc:
+        await db["orders"].update_one(
+            {"_id": order_doc["_id"]},
+            {"$set": {
+                "status": "Payment Confirmed - ERP Pending",
+                "erp_error_message": f"Could not rebuild order: {str(exc)}"[:500],
+                "updated_at": datetime.utcnow().isoformat(),
+            }},
+        )
+        return {"status": "invalid_order_snapshot"}
+
+    try:
+        # Runtime import avoids a module-import cycle: orders also imports the
+        # Converge verification service used above.
+        from app.api.endpoints.orders import create_order
+
+        result = await create_order(order_request, current_user)
+        return {"status": "finalized", "order": result}
+    except Exception as exc:
+        detail = getattr(exc, "detail", str(exc))
+        await db["orders"].update_one(
+            {"_id": order_doc["_id"]},
+            {"$set": {
+                "status": "Payment Confirmed - ERP Pending",
+                "erp_error_message": str(detail)[:500],
+                "updated_at": datetime.utcnow().isoformat(),
+            }},
+        )
+        print(f"Confirmed Converge payment could not be finalized in Spire: {detail}")
+        return {"status": "erp_pending"}
 
 
 def first_non_empty(*values) -> str:
@@ -48,6 +127,8 @@ class PaymentIntentRequest(BaseModel):
     shipping_address: Optional[str] = None
     shipping_address_details: Optional[dict] = None
     shipping_method: Optional[str] = None
+    ship_to_code: Optional[str] = None
+    ship_to_name: Optional[str] = None
     billing_address: Optional[str] = None
     billing_address_details: Optional[dict] = None
     po_number: Optional[str] = None
@@ -55,6 +136,36 @@ class PaymentIntentRequest(BaseModel):
     free_tshirt_size: Optional[str] = None
     shipping_cost: Optional[float] = 0.0
     tax_amount: Optional[float] = 0.0
+
+
+class ConvergeResultRequest(BaseModel):
+    local_order_id: str
+    ssl_txn_id: Optional[str] = None
+    ssl_result: Optional[str] = None
+    ssl_result_message: Optional[str] = None
+    ssl_avs_response: Optional[str] = None
+    ssl_cvv2_response: Optional[str] = None
+    ssl_issuer_response: Optional[str] = None
+    error_code: Optional[str] = None
+
+
+def request_client_ip(request: Request) -> str:
+    candidates = []
+    forwarded = request.headers.get("x-forwarded-for", "")
+    if forwarded:
+        candidates.append(forwarded.split(",", 1)[0].strip())
+    candidates.append(request.headers.get("x-real-ip", "").strip())
+    if request.client:
+        candidates.append(str(request.client.host or "").strip())
+
+    for candidate in candidates:
+        if not candidate:
+            continue
+        try:
+            return str(ip_address(candidate))
+        except ValueError:
+            continue
+    return ""
 
 async def update_local_order_status(intent_id: str, new_status: str, error_msg: str = None):
     try:
@@ -69,6 +180,7 @@ async def update_local_order_status(intent_id: str, new_status: str, error_msg: 
                 {"local_order_id": intent_id},
                 {"payment_session_id": intent_id},
                 {"converge_txn_id": intent_id},
+                {"converge_invoice_number": intent_id},
                 {"elavon_order_id": intent_id}
             ]},
             {"$set": update_data}
@@ -92,10 +204,28 @@ async def update_local_order_status_by_candidates(candidates: list, new_status: 
             {"local_order_id": {"$in": clean_candidates}},
             {"payment_session_id": {"$in": clean_candidates}},
             {"converge_txn_id": {"$in": clean_candidates}},
+            {"converge_invoice_number": {"$in": clean_candidates}},
             {"elavon_order_id": {"$in": clean_candidates}}
         ]},
         {"$set": update_data}
     )
+
+
+async def find_local_order_by_candidates(candidates: list) -> Optional[dict]:
+    clean_candidates = [str(candidate) for candidate in candidates if candidate]
+    if not clean_candidates:
+        return None
+    db = require_database()
+    return await db["orders"].find_one({
+        "$or": [
+            {"id": {"$in": clean_candidates}},
+            {"local_order_id": {"$in": clean_candidates}},
+            {"payment_session_id": {"$in": clean_candidates}},
+            {"converge_txn_id": {"$in": clean_candidates}},
+            {"converge_invoice_number": {"$in": clean_candidates}},
+            {"elavon_order_id": {"$in": clean_candidates}},
+        ]
+    })
 
 async def user_has_free_delivery(current_user: Optional[UserInDB]) -> bool:
     shipping_settings = await get_customer_shipping_settings(current_user)
@@ -180,9 +310,9 @@ async def create_payment_intent(
         if converge_hpp_configured():
             # Point Converge's receipt/error URLs at a BACKEND endpoint that accepts
             # both GET and POST. Converge's hosted page may return the result via POST
-            # (and Elavon recommends POST); a static frontend route can't handle a POST,
-            # which made Converge report "declined" even after the bank authorized. The
-            # backend endpoint normalizes the result and redirects to the checkout page.
+            # (and Elavon recommends POST); a static frontend route can't handle a POST.
+            # The backend verifies the result, finalizes approved orders server-side,
+            # and then redirects the browser to the checkout page.
             backend_url = str(http_request.base_url).rstrip("/")
             return_url = f"{backend_url}/api/payments/converge-return?local_order_id={local_order_id}"
             token = await create_converge_hpp_token(
@@ -190,8 +320,10 @@ async def create_payment_intent(
                 local_order_id=local_order_id,
                 customer_email=request.customer_email,
                 billing_address_details=request.billing_address_details,
+                shipping_address_details=request.shipping_address_details,
                 frontend_success_url=return_url,
                 frontend_cancel_url=return_url,
+                cardholder_ip=request_client_ip(http_request),
             )
 
             db = require_database()
@@ -200,6 +332,7 @@ async def create_payment_intent(
                 "id": local_order_id,
                 "local_order_id": local_order_id,
                 "payment_session_id": local_order_id,
+                "converge_invoice_number": converge_invoice_number(local_order_id),
                 "elavon_order_id": None,
                 "elavon_order_href": None,
                 "elavon_payment_session_href": None,
@@ -209,6 +342,8 @@ async def create_payment_intent(
                 "shipping_address": normalize_address(request.shipping_address) or None,
                 "shipping_address_details": request.shipping_address_details,
                 "shipping_method": request.shipping_method,
+                "ship_to_code": (request.ship_to_code or "").strip() or None,
+                "ship_to_name": (request.ship_to_name or "").strip() or None,
                 "billing_address": normalize_address(request.billing_address) or None,
                 "billing_address_details": request.billing_address_details,
                 "po_number": (request.po_number or "").strip() or None,
@@ -386,6 +521,94 @@ async def create_payment_intent(
             detail=f"An unexpected error occurred: {str(e)}"
         )
 
+@router.post("/converge-result")
+async def reconcile_converge_result(
+    report: ConvergeResultRequest,
+    current_user: UserInDB = Depends(get_current_user),
+):
+    """Record the Lightbox result and verify it server-to-server when possible.
+
+    Browser callbacks are useful diagnostics but are never trusted as proof of
+    approval. Only txnquery can promote an order to Payment Confirmed.
+    """
+    db = require_database()
+    local_order_id = normalize_address(report.local_order_id)
+    order = await db["orders"].find_one({
+        "$or": [
+            {"id": local_order_id},
+            {"local_order_id": local_order_id},
+            {"payment_session_id": local_order_id},
+            {"converge_invoice_number": local_order_id},
+        ]
+    })
+    if not order or order.get("provider") != "Elavon Converge HPP":
+        raise HTTPException(status_code=404, detail="Payment attempt not found.")
+
+    order_email = normalize_address(order.get("customer_email")).lower()
+    user_email = normalize_address(current_user.email).lower()
+    if order_email and order_email != user_email:
+        raise HTTPException(status_code=404, detail="Payment attempt not found.")
+
+    txn_id = normalize_address(report.ssl_txn_id)
+    verified = await query_converge_transaction(txn_id) if txn_id else None
+    verified_state = str((verified or {}).get("status") or "").upper()
+
+    diagnostics = {
+        "ssl_result": normalize_address((verified or {}).get("ssl_result") or report.ssl_result)[:20],
+        "ssl_result_message": normalize_address(
+            (verified or {}).get("ssl_result_message") or report.ssl_result_message
+        )[:255],
+        "ssl_avs_response": normalize_address(
+            (verified or {}).get("ssl_avs_response") or report.ssl_avs_response
+        )[:20],
+        "ssl_cvv2_response": normalize_address(
+            (verified or {}).get("ssl_cvv2_response") or report.ssl_cvv2_response
+        )[:20],
+        "ssl_issuer_response": normalize_address(
+            (verified or {}).get("ssl_issuer_response") or report.ssl_issuer_response
+        )[:50],
+        "error_code": normalize_address(report.error_code)[:50],
+        "reported_at": datetime.utcnow().isoformat(),
+        "server_verified": bool(verified),
+    }
+    diagnostics = {key: value for key, value in diagnostics.items() if value not in (None, "")}
+    update = {
+        "payment_result": diagnostics,
+        "updated_at": datetime.utcnow().isoformat(),
+    }
+
+    if verified_state == "APPROVED":
+        verified_txn_id = normalize_address((verified or {}).get("ssl_txn_id") or txn_id)
+        update.update({"status": "Payment Confirmed", "converge_txn_id": verified_txn_id})
+        await db["orders"].update_one({"_id": order["_id"]}, {"$set": update})
+        erp_result = await finalize_confirmed_order_in_spire(order, verified_txn_id)
+        return {
+            "status": "APPROVED",
+            "ssl_txn_id": verified_txn_id,
+            "ssl_result_message": diagnostics.get("ssl_result_message", "APPROVAL"),
+            "erp_status": erp_result.get("status"),
+        }
+
+    if verified_state == "DECLINED":
+        message = diagnostics.get("ssl_result_message") or "Transaction declined"
+        update.update({"status": "Payment Failed", "error_message": message})
+        await db["orders"].update_one({"_id": order["_id"]}, {"$set": update})
+        return {"status": "DECLINED", "ssl_result_message": message}
+
+    # A decline callback is still useful for support, but without txnquery it is
+    # deliberately not treated as a settled/approved charge.
+    callback_result = normalize_address(report.ssl_result)
+    if callback_result and callback_result != "0":
+        update["status"] = "Payment Declined (Unverified)"
+    await db["orders"].update_one({"_id": order["_id"]}, {"$set": update})
+    return {
+        # Do not tell the shopper to retry until the server has confirmed the decline;
+        # retrying an ambiguous result is how duplicate authorizations happen.
+        "status": "PENDING",
+        "ssl_result_message": diagnostics.get("ssl_result_message", ""),
+    }
+
+
 @router.post("/webhook")
 async def stripe_webhook(request: Request, stripe_signature: str = Header(None)):
     """
@@ -395,10 +618,28 @@ async def stripe_webhook(request: Request, stripe_signature: str = Header(None))
     # Converge suele enviar los datos como Form Data en lugar de JSON
     form_data = await request.form()
     txn_id = form_data.get("ssl_txn_id")
-    result = form_data.get("ssl_result")
-    
     if not txn_id:
         return {"status": "ignored"}
+
+    # Export-script payloads are not proof of payment on their own. Re-query Converge
+    # through the whitelisted server before changing the local payment state.
+    verified = await query_converge_transaction(str(txn_id))
+    if not verified:
+        return {"status": "pending_verification"}
+
+    result = str(verified.get("ssl_result") or "")
+    verified_txn_id = verified.get("ssl_txn_id") or txn_id
+    result_details = {
+        "payment_result": {
+            "ssl_result": result,
+            "ssl_result_message": verified.get("ssl_result_message") or form_data.get("ssl_result_message"),
+            "ssl_avs_response": verified.get("ssl_avs_response") or form_data.get("ssl_avs_response"),
+            "ssl_cvv2_response": verified.get("ssl_cvv2_response") or form_data.get("ssl_cvv2_response"),
+            "ssl_issuer_response": verified.get("ssl_issuer_response") or form_data.get("ssl_issuer_response"),
+            "reported_at": datetime.utcnow().isoformat(),
+            "server_verified": True,
+        }
+    }
 
     # ssl_result "0" significa aprobado en Converge
     if result == "0":
@@ -416,11 +657,18 @@ async def stripe_webhook(request: Request, stripe_signature: str = Header(None))
         ]
 
         # El pago fue confirmado; la orden queda Paid cuando también se crea/actualiza en Spire.
-        await update_local_order_status_by_candidates(candidates, "Payment Confirmed", {"converge_txn_id": txn_id})
-        intent_id = txn_id
+        await update_local_order_status_by_candidates(
+            candidates,
+            "Payment Confirmed",
+            {"converge_txn_id": verified_txn_id, **result_details},
+        )
+        confirmed_order = await find_local_order_by_candidates([*candidates, verified_txn_id])
+        if confirmed_order:
+            await finalize_confirmed_order_in_spire(confirmed_order, str(verified_txn_id))
+        intent_id = verified_txn_id
         print(f"💰 ¡Webhook: Pago exitoso procesado para Intent ID: {intent_id}")
     else:
-        error_message = form_data.get("ssl_result_message")
+        error_message = verified.get("ssl_result_message") or form_data.get("ssl_result_message")
         await update_local_order_status_by_candidates(
             [
                 txn_id,
@@ -430,7 +678,7 @@ async def stripe_webhook(request: Request, stripe_signature: str = Header(None))
                 form_data.get("local_order_id"),
             ],
             "Payment Failed",
-            {"error_message": error_message}
+            {"error_message": error_message, "converge_txn_id": verified_txn_id, **result_details}
         )
 
     return {"status": "success"}
@@ -439,10 +687,9 @@ async def stripe_webhook(request: Request, stripe_signature: str = Header(None))
 @router.api_route("/converge-return", methods=["GET", "POST"])
 async def converge_return(request: Request):
     """Return endpoint for the Converge hosted page. Accepts BOTH GET and POST so the
-    result is captured no matter how Converge sends it (Elavon recommends POST). A static
-    frontend route can't process a POST, which made Converge report "declined" even after
-    the bank authorized. This reads the result and redirects the browser to the checkout
-    page, where the order is finalized (or the decline message is shown)."""
+    result is captured no matter how Converge sends it. The return does not determine
+    whether Converge approves a card; it only reconciles the completed transaction and
+    makes sure an approval reaches Spire before redirecting the browser."""
     params = dict(request.query_params)
     if request.method == "POST":
         try:
@@ -456,6 +703,34 @@ async def converge_return(request: Request):
     txn_id = params.get("ssl_txn_id") or ""
     message = params.get("ssl_result_message") or ""
     local_order_id = params.get("local_order_id") or params.get("ssl_invoice_number") or ""
+
+    # The browser-facing result is useful, but txnquery is authoritative. This also
+    # covers the rare case where the hosted page reports a stale/ambiguous result after
+    # the processor has already recorded an approval.
+    if txn_id:
+        verified = await query_converge_transaction(txn_id)
+        verified_state = str((verified or {}).get("status") or "").upper()
+        if verified_state == "APPROVED":
+            ssl_result = "0"
+            message = (verified or {}).get("ssl_result_message") or "APPROVAL"
+            verified_txn_id = (verified or {}).get("ssl_txn_id") or txn_id
+            candidates = [local_order_id, params.get("ssl_invoice_number"), verified_txn_id]
+            await update_local_order_status_by_candidates(
+                candidates,
+                "Payment Confirmed",
+                {"converge_txn_id": verified_txn_id},
+            )
+            confirmed_order = await find_local_order_by_candidates(candidates)
+            if confirmed_order:
+                await finalize_confirmed_order_in_spire(confirmed_order, str(verified_txn_id))
+        elif verified_state == "DECLINED":
+            ssl_result = str((verified or {}).get("ssl_result") or ssl_result or "1")
+            message = (verified or {}).get("ssl_result_message") or message or "Transaction declined"
+            await update_local_order_status_by_candidates(
+                [local_order_id, params.get("ssl_invoice_number"), txn_id],
+                "Payment Failed",
+                {"converge_txn_id": txn_id, "error_message": message},
+            )
 
     frontend_url = settings.FRONTEND_URLS.split(",")[0].strip().rstrip("/")
     query = urlencode({

@@ -7,8 +7,119 @@ import httpx
 from app.core.config import settings
 
 
+COUNTRY_ISO3 = {
+    "ca": "CAN",
+    "can": "CAN",
+    "canada": "CAN",
+    "us": "USA",
+    "usa": "USA",
+    "united states": "USA",
+    "united states of america": "USA",
+}
+
+STATE_PROVINCE_CODES = {
+    "alberta": "AB",
+    "british columbia": "BC",
+    "manitoba": "MB",
+    "new brunswick": "NB",
+    "newfoundland and labrador": "NL",
+    "newfoundland": "NL",
+    "northwest territories": "NT",
+    "nova scotia": "NS",
+    "nunavut": "NU",
+    "ontario": "ON",
+    "prince edward island": "PE",
+    "quebec": "QC",
+    "saskatchewan": "SK",
+    "yukon": "YT",
+    "alabama": "AL",
+    "alaska": "AK",
+    "arizona": "AZ",
+    "arkansas": "AR",
+    "california": "CA",
+    "colorado": "CO",
+    "connecticut": "CT",
+    "delaware": "DE",
+    "district of columbia": "DC",
+    "florida": "FL",
+    "georgia": "GA",
+    "hawaii": "HI",
+    "idaho": "ID",
+    "illinois": "IL",
+    "indiana": "IN",
+    "iowa": "IA",
+    "kansas": "KS",
+    "kentucky": "KY",
+    "louisiana": "LA",
+    "maine": "ME",
+    "maryland": "MD",
+    "massachusetts": "MA",
+    "michigan": "MI",
+    "minnesota": "MN",
+    "mississippi": "MS",
+    "missouri": "MO",
+    "montana": "MT",
+    "nebraska": "NE",
+    "nevada": "NV",
+    "new hampshire": "NH",
+    "new jersey": "NJ",
+    "new mexico": "NM",
+    "new york": "NY",
+    "north carolina": "NC",
+    "north dakota": "ND",
+    "ohio": "OH",
+    "oklahoma": "OK",
+    "oregon": "OR",
+    "pennsylvania": "PA",
+    "rhode island": "RI",
+    "south carolina": "SC",
+    "south dakota": "SD",
+    "tennessee": "TN",
+    "texas": "TX",
+    "utah": "UT",
+    "vermont": "VT",
+    "virginia": "VA",
+    "washington": "WA",
+    "west virginia": "WV",
+    "wisconsin": "WI",
+    "wyoming": "WY",
+}
+
+
 def _clean(value: Optional[str]) -> str:
     return str(value or "").strip()
+
+
+def converge_country_code(value: Optional[str]) -> str:
+    cleaned = " ".join(_clean(value).split())
+    if not cleaned:
+        return ""
+    return COUNTRY_ISO3.get(cleaned.lower(), cleaned[:3].upper())
+
+
+def converge_state_code(value: Optional[str]) -> str:
+    cleaned = " ".join(_clean(value).split())
+    if not cleaned:
+        return ""
+    return STATE_PROVINCE_CODES.get(cleaned.lower(), cleaned[:2].upper())
+
+
+def converge_invoice_number(value: Optional[str]) -> str:
+    """Converge documents this field as alphanumeric with a 25-char limit."""
+    return "".join(char for char in _clean(value) if char.isalnum())[:25]
+
+
+def converge_phone(value: Optional[str], max_length: int = 20) -> str:
+    """Converge's shipping phone is numeric and limited to 10 digits."""
+    digits = "".join(char for char in _clean(value) if char.isdigit())
+    return digits[-max_length:]
+
+
+def _split_name(value: Optional[str]) -> tuple[str, str]:
+    parts = _clean(value).split()
+    if not parts:
+        return "", ""
+    return parts[0], " ".join(parts[1:])
 
 
 def converge_proxy_configured() -> bool:
@@ -117,8 +228,10 @@ async def create_converge_hpp_token(
     local_order_id: str,
     customer_email: Optional[str],
     billing_address_details: Optional[dict],
+    shipping_address_details: Optional[dict],
     frontend_success_url: str,
     frontend_cancel_url: str,
+    cardholder_ip: Optional[str] = None,
 ) -> str:
     if not converge_hpp_configured():
         raise RuntimeError("Converge HPP credentials are not configured.")
@@ -133,8 +246,10 @@ async def create_converge_hpp_token(
                     "local_order_id": local_order_id,
                     "customer_email": customer_email,
                     "billing": billing_address_details or {},
+                    "shipping": shipping_address_details or {},
                     "success_url": frontend_success_url,
                     "cancel_url": frontend_cancel_url,
+                    "cardholder_ip": _clean(cardholder_ip)[:40],
                 },
                 headers=_proxy_headers(),
             )
@@ -151,28 +266,42 @@ async def create_converge_hpp_token(
         return token
 
     billing = billing_address_details or {}
-    name = _clean(billing.get("name"))
-    first_name = ""
-    last_name = ""
-    if name:
-        parts = name.split()
-        first_name = parts[0]
-        last_name = " ".join(parts[1:])
+    shipping = shipping_address_details or {}
+    first_name, last_name = _split_name(billing.get("name"))
+    ship_first_name, ship_last_name = _split_name(shipping.get("name"))
 
     payload = {
         **converge_credentials(),
         "ssl_transaction_type": "ccsale",
         "ssl_amount": f"{float(amount):.2f}",
-        "ssl_invoice_number": local_order_id[:25],
-        "ssl_merchant_txn_id": local_order_id[:50],
-        "ssl_email": _clean(customer_email or billing.get("email")),
-        "ssl_first_name": first_name,
-        "ssl_last_name": last_name,
+        "ssl_invoice_number": converge_invoice_number(local_order_id),
+        "ssl_merchant_txn_id": converge_invoice_number(local_order_id)[:39],
+        "ssl_email": _clean(customer_email or billing.get("email"))[:100],
+        "ssl_first_name": first_name[:50],
+        "ssl_last_name": last_name[:50],
+        "ssl_company": _clean(billing.get("company"))[:50],
         "ssl_avs_address": _clean(billing.get("line1"))[:30],
-        "ssl_city": _clean(billing.get("city")),
-        "ssl_state": _clean(billing.get("prov_state") or billing.get("state")),
-        "ssl_avs_zip": _clean(billing.get("postal_code") or billing.get("zip")),
-        "ssl_country": _clean(billing.get("country")),
+        "ssl_address2": _clean(billing.get("line2"))[:30],
+        "ssl_city": _clean(billing.get("city"))[:30],
+        "ssl_state": converge_state_code(billing.get("prov_state") or billing.get("state")),
+        "ssl_avs_zip": _clean(billing.get("postal_code") or billing.get("zip"))[:9],
+        "ssl_country": converge_country_code(billing.get("country")),
+        "ssl_phone": converge_phone(billing.get("phone")),
+        "ssl_ship_to_company": _clean(shipping.get("company"))[:50],
+        "ssl_ship_to_first_name": ship_first_name[:50],
+        "ssl_ship_to_last_name": ship_last_name[:50],
+        "ssl_ship_to_address1": _clean(shipping.get("line1"))[:30],
+        "ssl_ship_to_address2": _clean(shipping.get("line2"))[:30],
+        "ssl_ship_to_city": _clean(shipping.get("city"))[:30],
+        "ssl_ship_to_state": converge_state_code(
+            shipping.get("prov_state") or shipping.get("state")
+        ),
+        "ssl_ship_to_zip": _clean(
+            shipping.get("postal_code") or shipping.get("zip")
+        )[:9],
+        "ssl_ship_to_country": converge_country_code(shipping.get("country")),
+        "ssl_ship_to_phone": converge_phone(shipping.get("phone"), 10),
+        "ssl_cardholder_ip": _clean(cardholder_ip)[:40],
         "ssl_result_format": "HTML",
         "ssl_receipt_link_method": "REDG",
         "ssl_receipt_link_url": frontend_success_url[:255],
@@ -226,9 +355,12 @@ async def query_converge_transaction(txn_id: Optional[str]) -> Optional[dict]:
             return None
         if not data:
             return None
+        result = _clean(data.get("ssl_result"))
+        if not result:
+            return None
         data["id"] = data.get("ssl_txn_id") or txn_id
         data["amount"] = data.get("ssl_amount")
-        data["status"] = "APPROVED" if data.get("ssl_result") == "0" else "DECLINED"
+        data["status"] = "APPROVED" if result == "0" else "DECLINED"
         data["state"] = data["status"]
         return data
 
@@ -255,8 +387,11 @@ async def query_converge_transaction(txn_id: Optional[str]) -> Optional[dict]:
     if not data:
         return None
 
+    result = _clean(data.get("ssl_result"))
+    if not result:
+        return None
     data["id"] = data.get("ssl_txn_id") or txn_id
     data["amount"] = data.get("ssl_amount")
-    data["status"] = "APPROVED" if data.get("ssl_result") == "0" else "DECLINED"
+    data["status"] = "APPROVED" if result == "0" else "DECLINED"
     data["state"] = data["status"]
     return data

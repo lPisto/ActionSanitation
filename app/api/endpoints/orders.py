@@ -775,6 +775,7 @@ async def create_order(order: OrderCreate, current_user: UserInDB = Depends(get_
                 {"local_order_id": {"$in": lookup_values}},
                 {"payment_session_id": {"$in": lookup_values}},
                 {"converge_txn_id": {"$in": lookup_values}},
+                {"converge_invoice_number": {"$in": lookup_values}},
                 {"elavon_order_id": {"$in": lookup_values}}
             ]
         })
