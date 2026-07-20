@@ -117,6 +117,7 @@ async def get_customer_shipping_settings(current_user: Optional[UserInDB]) -> di
 @router.post("/create-payment-intent")
 async def create_payment_intent(
     request: PaymentIntentRequest,
+    http_request: Request,
     current_user: Optional[UserInDB] = Depends(get_optional_current_user),
 ):
     try:
@@ -181,7 +182,7 @@ async def create_payment_intent(
             # (and Elavon recommends POST); a static frontend route can't handle a POST,
             # which made Converge report "declined" even after the bank authorized. The
             # backend endpoint normalizes the result and redirects to the checkout page.
-            backend_url = str(request.base_url).rstrip("/")
+            backend_url = str(http_request.base_url).rstrip("/")
             return_url = f"{backend_url}/api/payments/converge-return?local_order_id={local_order_id}"
             token = await create_converge_hpp_token(
                 amount=amount,
