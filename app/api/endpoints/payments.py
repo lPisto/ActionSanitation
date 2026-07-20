@@ -1,5 +1,7 @@
 import httpx
 from fastapi import APIRouter, Depends, HTTPException, Request, Header
+from fastapi.responses import RedirectResponse
+from urllib.parse import urlencode
 from pydantic import BaseModel
 from typing import Optional, List
 from datetime import datetime
@@ -174,15 +176,20 @@ async def create_payment_intent(
         frontend_url = settings.FRONTEND_URLS.split(",")[0].strip().rstrip("/")
 
         if converge_hpp_configured():
-            success_url = f"{frontend_url}/checkout/success?local_order_id={local_order_id}"
-            cancel_url = f"{frontend_url}/checkout/cancel?local_order_id={local_order_id}"
+            # Point Converge's receipt/error URLs at a BACKEND endpoint that accepts
+            # both GET and POST. Converge's hosted page may return the result via POST
+            # (and Elavon recommends POST); a static frontend route can't handle a POST,
+            # which made Converge report "declined" even after the bank authorized. The
+            # backend endpoint normalizes the result and redirects to the checkout page.
+            backend_url = str(request.base_url).rstrip("/")
+            return_url = f"{backend_url}/api/payments/converge-return?local_order_id={local_order_id}"
             token = await create_converge_hpp_token(
                 amount=amount,
                 local_order_id=local_order_id,
                 customer_email=request.customer_email,
                 billing_address_details=request.billing_address_details,
-                frontend_success_url=success_url,
-                frontend_cancel_url=cancel_url,
+                frontend_success_url=return_url,
+                frontend_cancel_url=return_url,
             )
 
             db = require_database()
@@ -424,3 +431,35 @@ async def stripe_webhook(request: Request, stripe_signature: str = Header(None))
         )
 
     return {"status": "success"}
+
+
+@router.api_route("/converge-return", methods=["GET", "POST"])
+async def converge_return(request: Request):
+    """Return endpoint for the Converge hosted page. Accepts BOTH GET and POST so the
+    result is captured no matter how Converge sends it (Elavon recommends POST). A static
+    frontend route can't process a POST, which made Converge report "declined" even after
+    the bank authorized. This reads the result and redirects the browser to the checkout
+    page, where the order is finalized (or the decline message is shown)."""
+    params = dict(request.query_params)
+    if request.method == "POST":
+        try:
+            form_data = await request.form()
+            for key, value in form_data.items():
+                params[key] = value
+        except Exception:
+            pass
+
+    ssl_result = str(params.get("ssl_result") or "")
+    txn_id = params.get("ssl_txn_id") or ""
+    message = params.get("ssl_result_message") or ""
+    local_order_id = params.get("local_order_id") or params.get("ssl_invoice_number") or ""
+
+    frontend_url = settings.FRONTEND_URLS.split(",")[0].strip().rstrip("/")
+    query = urlencode({
+        "ssl_txn_id": txn_id,
+        "ssl_result": ssl_result,
+        "ssl_result_message": message,
+        "local_order_id": local_order_id,
+    })
+    # CheckoutSuccess handles both approved (ssl_result == "0") and declined/cancelled.
+    return RedirectResponse(url=f"{frontend_url}/checkout/success?{query}", status_code=303)
