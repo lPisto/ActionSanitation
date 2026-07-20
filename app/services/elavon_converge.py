@@ -51,6 +51,14 @@ def converge_hpp_token_url() -> str:
     return f"{converge_hpp_base_url()}/hosted-payments/transaction_token"
 
 
+def converge_checkout_js_url() -> str:
+    # Converge Lightbox loader. NOTE: the Lightbox global (window.PayWithConverge.open)
+    # is defined by PayWithConverge.js — NOT Checkout.js (which defines the separate
+    # window.ConvergeEmbeddedPayment API). Loading the wrong one leaves PayWithConverge
+    # undefined and the checkout silently falls back to the hosted-page redirect.
+    return f"{converge_hpp_base_url()}/hosted-payments/PayWithConverge.js"
+
+
 def converge_xml_url() -> str:
     configured = _clean(settings.CONVERGE_XML_URL)
     if configured:

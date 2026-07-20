@@ -16,6 +16,7 @@ from app.services.shipping_rules import calculate_shipping_breakdown, items_tota
 from app.services.elavon_converge import (
     converge_hpp_configured,
     converge_hpp_payment_url,
+    converge_checkout_js_url,
     create_converge_hpp_token,
 )
 
@@ -234,6 +235,7 @@ async def create_payment_intent(
                 "localOrderId": local_order_id,
                 "paymentSessionUrl": None,
                 "elavonHppUrl": converge_hpp_payment_url(),
+                "elavonCheckoutJsUrl": converge_checkout_js_url(),
                 "elavonHppFields": {"ssl_txn_auth_token": token},
             }
 
