@@ -735,12 +735,28 @@ async def converge_return(request: Request):
     message = params.get("ssl_result_message") or ""
     local_order_id = params.get("local_order_id") or params.get("ssl_invoice_number") or ""
 
+    print("=" * 70)
+    print(f"[CONVERGE-RETURN] method={request.method} order={local_order_id or '-'} "
+          f"txn={txn_id or '-'} browser_ssl_result={ssl_result or '-'} "
+          f"browser_message={message!r}")
+    # Log every field Converge sent back on the redirect (AVS/CVV live here too).
+    for key in sorted(params.keys()):
+        if key in {"ssl_token", "local_order_id"}:
+            continue
+        print(f"[CONVERGE-RETURN]   {key} = {params[key]!r}")
+
     # The browser-facing result is useful, but txnquery is authoritative. This also
     # covers the rare case where the hosted page reports a stale/ambiguous result after
     # the processor has already recorded an approval.
     if txn_id:
         verified = await query_converge_transaction(txn_id)
         verified_state = str((verified or {}).get("status") or "").upper()
+        print(f"[CONVERGE-RETURN] txnquery verified_state={verified_state or 'NONE'} "
+              f"result={(verified or {}).get('ssl_result')!r} "
+              f"message={(verified or {}).get('ssl_result_message')!r} "
+              f"avs={(verified or {}).get('ssl_avs_response')!r} "
+              f"cvv2={(verified or {}).get('ssl_cvv2_response')!r} "
+              f"issuer={(verified or {}).get('ssl_issuer_response')!r}")
         if verified_state == "APPROVED":
             ssl_result = "0"
             message = (verified or {}).get("ssl_result_message") or "APPROVAL"
