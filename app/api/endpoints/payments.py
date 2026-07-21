@@ -325,6 +325,10 @@ async def create_payment_intent(
                 frontend_cancel_url=return_url,
                 cardholder_ip=request_client_ip(http_request),
             )
+            print(
+                f"[CONVERGE-TOKEN] order={local_order_id} amount={amount:.2f} "
+                f"token_obtained={bool(token)}"
+            )
 
             db = require_database()
             now = datetime.utcnow().isoformat()
@@ -572,6 +576,12 @@ async def reconcile_converge_result(
         "server_verified": bool(verified),
     }
     diagnostics = {key: value for key, value in diagnostics.items() if value not in (None, "")}
+    # Surfaced in the live logs so a test/real decline is visible without querying Mongo.
+    print(
+        f"[CONVERGE-RESULT] order={local_order_id} txn={txn_id or '-'} "
+        f"verified_state={verified_state or 'NONE'} server_verified={bool(verified)} "
+        f"diagnostics={diagnostics}"
+    )
     update = {
         "payment_result": diagnostics,
         "updated_at": datetime.utcnow().isoformat(),
