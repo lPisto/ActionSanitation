@@ -19,7 +19,9 @@ from app.services.elavon_converge import (
     converge_hpp_configured,
     converge_hpp_payment_url,
     converge_checkout_js_url,
+    converge_country_code,
     converge_invoice_number,
+    converge_state_code,
     create_converge_hpp_token,
     query_converge_transaction,
 )
@@ -315,6 +317,7 @@ async def create_payment_intent(
             # and then redirects the browser to the checkout page.
             backend_url = str(http_request.base_url).rstrip("/")
             return_url = f"{backend_url}/api/payments/converge-return?local_order_id={local_order_id}"
+            cardholder_ip = request_client_ip(http_request)
             token = await create_converge_hpp_token(
                 amount=amount,
                 local_order_id=local_order_id,
@@ -323,11 +326,18 @@ async def create_payment_intent(
                 shipping_address_details=request.shipping_address_details,
                 frontend_success_url=return_url,
                 frontend_cancel_url=return_url,
-                cardholder_ip=request_client_ip(http_request),
+                cardholder_ip=cardholder_ip,
             )
+            billing = request.billing_address_details or {}
+            shipping = request.shipping_address_details or {}
             print(
                 f"[CONVERGE-TOKEN] order={local_order_id} amount={amount:.2f} "
-                f"token_obtained={bool(token)}"
+                f"token_obtained={bool(token)} "
+                f"billing_country={converge_country_code(billing.get('country')) or '-'} "
+                f"billing_state={converge_state_code(billing.get('prov_state') or billing.get('state'), billing.get('country')) or '-'} "
+                f"shipping_country={converge_country_code(shipping.get('country')) or '-'} "
+                f"shipping_state={converge_state_code(shipping.get('prov_state') or shipping.get('state'), shipping.get('country')) or '-'} "
+                f"cardholder_ip_present={bool(cardholder_ip)}"
             )
 
             db = require_database()
@@ -554,8 +564,18 @@ async def reconcile_converge_result(
         raise HTTPException(status_code=404, detail="Payment attempt not found.")
 
     txn_id = normalize_address(report.ssl_txn_id)
+    # Full trace of what the browser reported vs what the server re-query returns.
+    print("=" * 70)
+    print(f"[CONVERGE-RESULT] order={local_order_id} txn={txn_id or '-'} BEGIN")
+    print(f"[CONVERGE-RESULT] browser_report={report.model_dump()}")
     verified = await query_converge_transaction(txn_id) if txn_id else None
     verified_state = str((verified or {}).get("status") or "").upper()
+    if verified is None:
+        print(f"[CONVERGE-RESULT] server txnquery returned NOTHING "
+              f"(no txn_id or Converge did not answer) txn={txn_id or '-'}")
+    else:
+        for key in sorted(verified.keys()):
+            print(f"[CONVERGE-RESULT]   {key} = {verified[key]!r}")
 
     diagnostics = {
         "ssl_result": normalize_address((verified or {}).get("ssl_result") or report.ssl_result)[:20],
@@ -582,6 +602,7 @@ async def reconcile_converge_result(
         f"verified_state={verified_state or 'NONE'} server_verified={bool(verified)} "
         f"diagnostics={diagnostics}"
     )
+    print(f"[CONVERGE-RESULT] order={local_order_id} txn={txn_id or '-'} END")
     update = {
         "payment_result": diagnostics,
         "updated_at": datetime.utcnow().isoformat(),

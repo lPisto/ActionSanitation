@@ -15,6 +15,15 @@ COUNTRY_ISO3 = {
     "usa": "USA",
     "united states": "USA",
     "united states of america": "USA",
+    "gb": "GBR",
+    "gbr": "GBR",
+    "uk": "GBR",
+    "united kingdom": "GBR",
+    "great britain": "GBR",
+    "england": "GBR",
+    "scotland": "GBR",
+    "wales": "GBR",
+    "northern ireland": "GBR",
 }
 
 STATE_PROVINCE_CODES = {
@@ -94,12 +103,22 @@ def converge_country_code(value: Optional[str]) -> str:
     cleaned = " ".join(_clean(value).split())
     if not cleaned:
         return ""
-    return COUNTRY_ISO3.get(cleaned.lower(), cleaned[:3].upper())
+    mapped = COUNTRY_ISO3.get(cleaned.lower())
+    if mapped:
+        return mapped
+    # Accept an already-normalized ISO alpha-3 value. Do not guess from a country
+    # name (for example, United Kingdom -> UNI is invalid and can trip fraud rules).
+    upper = cleaned.upper()
+    return upper if len(upper) == 3 and upper.isalpha() else ""
 
 
-def converge_state_code(value: Optional[str]) -> str:
+def converge_state_code(value: Optional[str], country: Optional[str] = None) -> str:
     cleaned = " ".join(_clean(value).split())
     if not cleaned:
+        return ""
+    # Converge only allows two characters here. Counties such as Surrey cannot be
+    # truncated into a made-up code; omit the optional field outside Canada/USA.
+    if country is not None and converge_country_code(country) not in {"CAN", "USA"}:
         return ""
     return STATE_PROVINCE_CODES.get(cleaned.lower(), cleaned[:2].upper())
 
@@ -283,7 +302,9 @@ async def create_converge_hpp_token(
         "ssl_avs_address": _clean(billing.get("line1"))[:30],
         "ssl_address2": _clean(billing.get("line2"))[:30],
         "ssl_city": _clean(billing.get("city"))[:30],
-        "ssl_state": converge_state_code(billing.get("prov_state") or billing.get("state")),
+        "ssl_state": converge_state_code(
+            billing.get("prov_state") or billing.get("state"), billing.get("country")
+        ),
         "ssl_avs_zip": _clean(billing.get("postal_code") or billing.get("zip"))[:9],
         "ssl_country": converge_country_code(billing.get("country")),
         "ssl_phone": converge_phone(billing.get("phone")),
@@ -294,7 +315,7 @@ async def create_converge_hpp_token(
         "ssl_ship_to_address2": _clean(shipping.get("line2"))[:30],
         "ssl_ship_to_city": _clean(shipping.get("city"))[:30],
         "ssl_ship_to_state": converge_state_code(
-            shipping.get("prov_state") or shipping.get("state")
+            shipping.get("prov_state") or shipping.get("state"), shipping.get("country")
         ),
         "ssl_ship_to_zip": _clean(
             shipping.get("postal_code") or shipping.get("zip")
@@ -347,16 +368,20 @@ async def query_converge_transaction(txn_id: Optional[str]) -> Optional[dict]:
                     json={"txn_id": txn_id},
                     headers=_proxy_headers(),
                 )
+            print(f"[CONVERGE-TXNQUERY] via proxy txn={txn_id} "
+                  f"http_status={response.status_code} body={response.text[:1000]}")
             if response.status_code != 200:
                 return None
             data = response.json() or {}
         except Exception as exc:
-            print(f"Converge txnquery via proxy failed: {exc}")
+            print(f"[CONVERGE-TXNQUERY] via proxy FAILED txn={txn_id} error={exc}")
             return None
         if not data:
+            print(f"[CONVERGE-TXNQUERY] via proxy EMPTY body txn={txn_id}")
             return None
         result = _clean(data.get("ssl_result"))
         if not result:
+            print(f"[CONVERGE-TXNQUERY] via proxy NO ssl_result txn={txn_id} keys={list(data.keys())}")
             return None
         data["id"] = data.get("ssl_txn_id") or txn_id
         data["amount"] = data.get("ssl_amount")
