@@ -715,33 +715,75 @@ async def stripe_webhook(request: Request, stripe_signature: str = Header(None))
     return {"status": "success"}
 
 
+def _mask_converge_params(params: dict) -> dict:
+    """Redact secrets before logging. AVS/CVV *response* codes are kept on purpose —
+    they are result indicators (M/N/etc.), not the cardholder's CVV, and we need them."""
+    return {
+        key: ("***" if key in ("ssl_token", "ssl_pin") else value)
+        for key, value in params.items()
+    }
+
+
 @router.api_route("/converge-return", methods=["GET", "POST"])
 async def converge_return(request: Request):
     """Return endpoint for the Converge hosted page. Accepts BOTH GET and POST so the
     result is captured no matter how Converge sends it. The return does not determine
     whether Converge approves a card; it only reconciles the completed transaction and
     makes sure an approval reaches Spire before redirecting the browser."""
-    params = dict(request.query_params)
+    print("=" * 70)
+    print(f"[CONVERGE-RETURN] >>> hit method={request.method} url={str(request.url)!r}")
+    try:
+        client_ip = request_client_ip(request)
+    except Exception:
+        client_ip = "-"
+    print(f"[CONVERGE-RETURN] client_ip={client_ip} "
+          f"content_type={request.headers.get('content-type', '-')!r} "
+          f"referer={request.headers.get('referer', '-')!r} "
+          f"user_agent={request.headers.get('user-agent', '-')!r}")
+
+    # Query-string params (GET redirects, plus the local_order_id we append per-txn).
+    query_params = dict(request.query_params)
+    print(f"[CONVERGE-RETURN] query_params={_mask_converge_params(query_params)!r}")
+
+    # Form/body params (Converge POSTs the full transaction result here).
+    form_params: dict = {}
     if request.method == "POST":
         try:
             form_data = await request.form()
             for key, value in form_data.items():
-                params[key] = value
-        except Exception:
-            pass
+                form_params[key] = value
+        except Exception as exc:
+            import traceback
+            print(f"[CONVERGE-RETURN] !! failed to parse form body: {exc!r}")
+            print(traceback.format_exc())
+        if form_params:
+            print(f"[CONVERGE-RETURN] form_params={_mask_converge_params(form_params)!r}")
+        else:
+            # Body wasn't standard form-encoding — capture it raw so we can see what came.
+            try:
+                raw_body = (await request.body()).decode("utf-8", "replace")
+            except Exception as exc:
+                raw_body = f"<unreadable: {exc!r}>"
+            print(f"[CONVERGE-RETURN] form_params=EMPTY raw_body={raw_body[:2000]!r}")
+
+    # Merge: POSTed form values win over query-string values.
+    params = {**query_params, **form_params}
 
     ssl_result = str(params.get("ssl_result") or "")
     txn_id = params.get("ssl_txn_id") or ""
     message = params.get("ssl_result_message") or ""
     local_order_id = params.get("local_order_id") or params.get("ssl_invoice_number") or ""
 
-    print("=" * 70)
-    print(f"[CONVERGE-RETURN] method={request.method} order={local_order_id or '-'} "
+    print(f"[CONVERGE-RETURN] parsed order={local_order_id or '-'} "
           f"txn={txn_id or '-'} browser_ssl_result={ssl_result or '-'} "
-          f"browser_message={message!r}")
+          f"browser_message={message!r} "
+          f"avs={params.get('ssl_avs_response', '-')!r} "
+          f"cvv2={params.get('ssl_cvv2_response', '-')!r} "
+          f"approval={params.get('ssl_approval_code', '-')!r} "
+          f"invoice={params.get('ssl_invoice_number', '-')!r}")
     # Log every field Converge sent back on the redirect (AVS/CVV live here too).
     for key in sorted(params.keys()):
-        if key in {"ssl_token", "local_order_id"}:
+        if key in {"ssl_token", "ssl_pin", "local_order_id"}:
             continue
         print(f"[CONVERGE-RETURN]   {key} = {params[key]!r}")
 
@@ -749,6 +791,7 @@ async def converge_return(request: Request):
     # covers the rare case where the hosted page reports a stale/ambiguous result after
     # the processor has already recorded an approval.
     if txn_id:
+        print(f"[CONVERGE-RETURN] running txnquery for txn={txn_id} ...")
         verified = await query_converge_transaction(txn_id)
         verified_state = str((verified or {}).get("status") or "").upper()
         print(f"[CONVERGE-RETURN] txnquery verified_state={verified_state or 'NONE'} "
@@ -756,12 +799,15 @@ async def converge_return(request: Request):
               f"message={(verified or {}).get('ssl_result_message')!r} "
               f"avs={(verified or {}).get('ssl_avs_response')!r} "
               f"cvv2={(verified or {}).get('ssl_cvv2_response')!r} "
-              f"issuer={(verified or {}).get('ssl_issuer_response')!r}")
+              f"issuer={(verified or {}).get('ssl_issuer_response')!r} "
+              f"approval={(verified or {}).get('ssl_approval_code')!r}")
         if verified_state == "APPROVED":
             ssl_result = "0"
             message = (verified or {}).get("ssl_result_message") or "APPROVAL"
             verified_txn_id = (verified or {}).get("ssl_txn_id") or txn_id
             candidates = [local_order_id, params.get("ssl_invoice_number"), verified_txn_id]
+            print(f"[CONVERGE-RETURN] APPROVED -> reconciling "
+                  f"candidates={[c for c in candidates if c]}")
             await update_local_order_status_by_candidates(
                 candidates,
                 "Payment Confirmed",
@@ -769,15 +815,39 @@ async def converge_return(request: Request):
             )
             confirmed_order = await find_local_order_by_candidates(candidates)
             if confirmed_order:
-                await finalize_confirmed_order_in_spire(confirmed_order, str(verified_txn_id))
+                print(f"[CONVERGE-RETURN] matched order id={confirmed_order.get('id')!r} "
+                      f"-> finalizing in Spire")
+                try:
+                    result = await finalize_confirmed_order_in_spire(
+                        confirmed_order, str(verified_txn_id)
+                    )
+                    print(f"[CONVERGE-RETURN] Spire finalize result={result!r}")
+                except Exception as exc:
+                    import traceback
+                    print(f"[CONVERGE-RETURN] !! Spire finalize FAILED: {exc!r}")
+                    print(traceback.format_exc())
+            else:
+                print(f"[CONVERGE-RETURN] !! NO local order matched "
+                      f"candidates={[c for c in candidates if c]} — order will NOT be finalized")
         elif verified_state == "DECLINED":
             ssl_result = str((verified or {}).get("ssl_result") or ssl_result or "1")
             message = (verified or {}).get("ssl_result_message") or message or "Transaction declined"
+            candidates = [local_order_id, params.get("ssl_invoice_number"), txn_id]
+            print(f"[CONVERGE-RETURN] DECLINED -> marking Payment Failed "
+                  f"candidates={[c for c in candidates if c]} message={message!r}")
             await update_local_order_status_by_candidates(
-                [local_order_id, params.get("ssl_invoice_number"), txn_id],
+                candidates,
                 "Payment Failed",
                 {"converge_txn_id": txn_id, "error_message": message},
             )
+        else:
+            print(f"[CONVERGE-RETURN] !! txnquery returned unrecognized "
+                  f"state={verified_state!r} — leaving browser result as-is")
+    else:
+        print("[CONVERGE-RETURN] !! no ssl_txn_id present -> cannot run txnquery. "
+              f"Relying on browser ssl_result={ssl_result or '-'}. If this was a decline, "
+              "enable 'Include Original Post Data' on the Converge Decline Page so the "
+              "result (and ssl_txn_id) is POSTed back here.")
 
     frontend_url = settings.FRONTEND_URLS.split(",")[0].strip().rstrip("/")
     query = urlencode({
@@ -786,5 +856,8 @@ async def converge_return(request: Request):
         "ssl_result_message": message,
         "local_order_id": local_order_id,
     })
+    redirect_target = f"{frontend_url}/checkout/success?{query}"
+    print(f"[CONVERGE-RETURN] <<< redirecting browser -> {redirect_target}")
+    print("=" * 70)
     # CheckoutSuccess handles both approved (ssl_result == "0") and declined/cancelled.
-    return RedirectResponse(url=f"{frontend_url}/checkout/success?{query}", status_code=303)
+    return RedirectResponse(url=redirect_target, status_code=303)
