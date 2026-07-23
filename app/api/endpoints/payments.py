@@ -24,6 +24,7 @@ from app.services.elavon_converge import (
     converge_state_code,
     create_converge_hpp_token,
     query_converge_transaction,
+    search_converge_by_invoice,
 )
 
 router = APIRouter()
@@ -715,6 +716,65 @@ async def stripe_webhook(request: Request, stripe_signature: str = Header(None))
     return {"status": "success"}
 
 
+async def reconcile_converge_order_by_invoice(local_order_id: str) -> dict:
+    """Ask Converge for the real status of an order using OUR invoice number, then
+    reconcile the local order and Spire. This does not depend on the browser return
+    (which can arrive empty), so an approved payment is never lost."""
+    invoice = converge_invoice_number(local_order_id)
+    txns = await search_converge_by_invoice(invoice)
+    print(f"[CONVERGE-RECONCILE] order={local_order_id or '-'} invoice={invoice or '-'} "
+          f"found={len(txns)} transaction(s)")
+    if not txns:
+        return {"status": "not_found", "invoice": invoice}
+
+    # Prefer an approved transaction; otherwise fall back to the last result we saw.
+    approved = next((t for t in txns if t.get("status") == "APPROVED"), None)
+    chosen = approved or txns[-1]
+    txn_id = _clean_str(chosen.get("ssl_txn_id"))
+    candidates = [local_order_id, invoice, txn_id]
+
+    if chosen.get("status") == "APPROVED":
+        print(f"[CONVERGE-RECONCILE] APPROVED txn={txn_id or '-'} -> confirming order")
+        await update_local_order_status_by_candidates(
+            candidates, "Payment Confirmed", {"converge_txn_id": txn_id}
+        )
+        confirmed_order = await find_local_order_by_candidates(candidates)
+        if confirmed_order:
+            try:
+                await finalize_confirmed_order_in_spire(confirmed_order, str(txn_id))
+            except Exception as exc:
+                import traceback
+                print(f"[CONVERGE-RECONCILE] !! Spire finalize FAILED: {exc!r}")
+                print(traceback.format_exc())
+        else:
+            print(f"[CONVERGE-RECONCILE] !! approved but NO local order matched "
+                  f"candidates={[c for c in candidates if c]}")
+        return {"status": "approved", "txn_id": txn_id, "invoice": invoice,
+                "avs": chosen.get("ssl_avs_response"), "cvv2": chosen.get("ssl_cvv2_response")}
+
+    message = chosen.get("ssl_result_message") or "Transaction declined"
+    print(f"[CONVERGE-RECONCILE] DECLINED txn={txn_id or '-'} message={message!r} "
+          f"avs={chosen.get('ssl_avs_response')!r} cvv2={chosen.get('ssl_cvv2_response')!r}")
+    await update_local_order_status_by_candidates(
+        candidates, "Payment Failed",
+        {"converge_txn_id": txn_id, "error_message": message},
+    )
+    return {"status": "declined", "txn_id": txn_id, "message": message, "invoice": invoice,
+            "avs": chosen.get("ssl_avs_response"), "cvv2": chosen.get("ssl_cvv2_response")}
+
+
+def _clean_str(value) -> str:
+    return str(value or "").strip()
+
+
+@router.post("/reconcile/{local_order_id}")
+async def reconcile_payment(local_order_id: str):
+    """Reconcile a payment by invoice number. The frontend success page (which still
+    knows its own order id even when the Converge return came back empty) calls this to
+    make sure an approved payment is captured and a declined one is marked failed."""
+    return await reconcile_converge_order_by_invoice(local_order_id)
+
+
 def _mask_converge_params(params: dict) -> dict:
     """Redact secrets before logging. AVS/CVV *response* codes are kept on purpose —
     they are result indicators (M/N/etc.), not the cardholder's CVV, and we need them."""
@@ -842,11 +902,24 @@ async def converge_return(request: Request):
         else:
             print(f"[CONVERGE-RETURN] !! txnquery returned unrecognized "
                   f"state={verified_state!r} — leaving browser result as-is")
+    elif local_order_id:
+        # No ssl_txn_id (e.g. the empty decline POST), but we know the order — reconcile
+        # by invoice number so an approved payment is still captured.
+        print(f"[CONVERGE-RETURN] no ssl_txn_id but order={local_order_id} -> "
+              "reconciling by invoice number")
+        recon = await reconcile_converge_order_by_invoice(local_order_id)
+        if recon.get("status") == "approved":
+            ssl_result = "0"
+            txn_id = recon.get("txn_id") or txn_id
+            message = "APPROVAL"
+        elif recon.get("status") == "declined":
+            ssl_result = ssl_result or "1"
+            message = recon.get("message") or message or "Transaction declined"
     else:
-        print("[CONVERGE-RETURN] !! no ssl_txn_id present -> cannot run txnquery. "
-              f"Relying on browser ssl_result={ssl_result or '-'}. If this was a decline, "
-              "enable 'Include Original Post Data' on the Converge Decline Page so the "
-              "result (and ssl_txn_id) is POSTed back here.")
+        print("[CONVERGE-RETURN] !! no ssl_txn_id AND no order id present -> cannot "
+              "identify the transaction. The account 'Redirect URL' posts empty; use the "
+              "Approval/Decline Button Link with 'Include Original Post Data', or the "
+              "frontend /reconcile/{order} call.")
 
     frontend_url = settings.FRONTEND_URLS.split(",")[0].strip().rstrip("/")
     query = urlencode({

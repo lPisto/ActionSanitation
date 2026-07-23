@@ -241,6 +241,27 @@ def _parse_xml_response(text: str) -> dict:
     return result
 
 
+def _parse_xml_txn_list(text: str) -> list:
+    """Parse a txnquery SEARCH response, which may contain zero or more <txn> elements
+    (typically wrapped in <txnList>). Falls back to a single flat result if that's what
+    Converge returned (single match or an error envelope)."""
+    raw = (text or "").strip()
+    if not raw:
+        return []
+    try:
+        root = ElementTree.fromstring(raw)
+    except ElementTree.ParseError:
+        return []
+    txns = root.findall(".//txn")
+    if not txns:
+        fields = {child.tag: (child.text or "").strip() for child in list(root)}
+        return [fields] if fields else []
+    return [
+        {child.tag: (child.text or "").strip() for child in list(txn)}
+        for txn in txns
+    ]
+
+
 async def create_converge_hpp_token(
     *,
     amount: float,
@@ -420,3 +441,65 @@ async def query_converge_transaction(txn_id: Optional[str]) -> Optional[dict]:
     data["status"] = "APPROVED" if result == "0" else "DECLINED"
     data["state"] = data["status"]
     return data
+
+
+async def search_converge_by_invoice(invoice_number: Optional[str]) -> list:
+    """Find Converge transactions by OUR invoice number (webXXX), independent of any
+    ssl_txn_id on the browser return (which can arrive empty). Returns a list of
+    normalized transaction dicts, each tagged with status APPROVED/DECLINED."""
+    invoice = converge_invoice_number(invoice_number)
+    if not invoice or not converge_hpp_configured():
+        return []
+
+    raw_txns: list = []
+    if converge_proxy_configured():
+        try:
+            async with httpx.AsyncClient(timeout=35) as client:
+                response = await client.post(
+                    f"{converge_proxy_base_url()}/converge/txnsearch",
+                    json={"invoice_number": invoice},
+                    headers=_proxy_headers(),
+                )
+            print(f"[CONVERGE-TXNSEARCH] via proxy invoice={invoice} "
+                  f"http_status={response.status_code} body={response.text[:1000]}")
+            if response.status_code != 200:
+                return []
+            raw_txns = (response.json() or {}).get("transactions") or []
+        except Exception as exc:
+            print(f"[CONVERGE-TXNSEARCH] via proxy FAILED invoice={invoice} error={exc}")
+            return []
+    else:
+        fields = {
+            **converge_credentials(),
+            "ssl_transaction_type": "txnquery",
+            "ssl_invoice_number": invoice,
+        }
+        try:
+            async with httpx.AsyncClient(timeout=30) as client:
+                response = await client.post(
+                    converge_xml_url(),
+                    data={"xmldata": _xml_from_fields(fields)},
+                    headers={
+                        "Content-Type": "application/x-www-form-urlencoded",
+                        "Accept": "text/xml",
+                    },
+                )
+            if response.status_code != 200:
+                return []
+            raw_txns = _parse_xml_txn_list(response.text)
+        except Exception as exc:
+            print(f"[CONVERGE-TXNSEARCH] direct FAILED invoice={invoice} error={exc}")
+            return []
+
+    normalized = []
+    for txn in raw_txns:
+        result = _clean(txn.get("ssl_result"))
+        # Keep rows that carry a real result or at least a txn id; skip empty envelopes.
+        if not result and not _clean(txn.get("ssl_txn_id")):
+            continue
+        txn["status"] = "APPROVED" if result == "0" else "DECLINED"
+        txn["id"] = txn.get("ssl_txn_id")
+        normalized.append(txn)
+    print(f"[CONVERGE-TXNSEARCH] invoice={invoice} normalized={len(normalized)} "
+          f"statuses={[t.get('status') for t in normalized]}")
+    return normalized
