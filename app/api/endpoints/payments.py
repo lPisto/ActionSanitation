@@ -745,25 +745,24 @@ async def converge_return(request: Request):
     query_params = dict(request.query_params)
     print(f"[CONVERGE-RETURN] query_params={_mask_converge_params(query_params)!r}")
 
-    # Form/body params (Converge POSTs the full transaction result here).
+    # Form/body params (Converge POSTs the full transaction result here). Read the raw
+    # body FIRST (so we always see what came) and parse it ourselves — calling
+    # request.form() before request.body() consumes the stream and hides the payload.
     form_params: dict = {}
     if request.method == "POST":
+        raw_body = ""
         try:
-            form_data = await request.form()
-            for key, value in form_data.items():
-                form_params[key] = value
+            raw_body = (await request.body()).decode("utf-8", "replace")
         except Exception as exc:
-            import traceback
-            print(f"[CONVERGE-RETURN] !! failed to parse form body: {exc!r}")
-            print(traceback.format_exc())
+            print(f"[CONVERGE-RETURN] !! failed to read raw body: {exc!r}")
+        try:
+            from urllib.parse import parse_qsl
+            form_params = dict(parse_qsl(raw_body, keep_blank_values=True))
+        except Exception as exc:
+            print(f"[CONVERGE-RETURN] !! failed to parse body: {exc!r}")
         if form_params:
             print(f"[CONVERGE-RETURN] form_params={_mask_converge_params(form_params)!r}")
         else:
-            # Body wasn't standard form-encoding — capture it raw so we can see what came.
-            try:
-                raw_body = (await request.body()).decode("utf-8", "replace")
-            except Exception as exc:
-                raw_body = f"<unreadable: {exc!r}>"
             print(f"[CONVERGE-RETURN] form_params=EMPTY raw_body={raw_body[:2000]!r}")
 
     # Merge: POSTed form values win over query-string values.
