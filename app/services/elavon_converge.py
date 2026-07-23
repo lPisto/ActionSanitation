@@ -493,6 +493,15 @@ async def search_converge_by_invoice(invoice_number: Optional[str]) -> list:
 
     normalized = []
     for txn in raw_txns:
+        # Skip error envelopes (e.g. {'errorCode': '6042', ...}).
+        if txn.get("errorCode") or txn.get("errorMessage"):
+            print(f"[CONVERGE-TXNSEARCH] invoice={invoice} converge error "
+                  f"code={txn.get('errorCode')!r} msg={txn.get('errorMessage')!r}")
+            continue
+        # The date-range search can return other transactions — keep only OUR invoice.
+        txn_invoice = _clean(txn.get("ssl_invoice_number"))
+        if txn_invoice and txn_invoice != invoice:
+            continue
         result = _clean(txn.get("ssl_result"))
         # Keep rows that carry a real result or at least a txn id; skip empty envelopes.
         if not result and not _clean(txn.get("ssl_txn_id")):
