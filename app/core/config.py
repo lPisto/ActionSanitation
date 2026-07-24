@@ -29,6 +29,12 @@ class Settings(BaseSettings):
     CONVERGE_PROXY_URL: str = ""
     CONVERGE_PROXY_SECRET: str = ""
     
+    # Stripe (live payments). Get these from the Stripe Dashboard.
+    STRIPE_SECRET_KEY: str = ""
+    STRIPE_PUBLISHABLE_KEY: str = ""
+    STRIPE_WEBHOOK_SECRET: str = ""
+    STRIPE_CURRENCY: str = "cad"
+
     SECRET_KEY: str
     ALGORITHM: str = "HS256"
     ACCESS_TOKEN_EXPIRE_MINUTES: int = 1440 # 24 hours
@@ -61,5 +67,6 @@ class Settings(BaseSettings):
 
     class Config:
         env_file = ".env"
+        extra = "ignore"  # tolerate stray env vars (e.g. proxy-only keys) without crashing
 
 settings = Settings()

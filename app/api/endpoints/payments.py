@@ -1,4 +1,5 @@
 import httpx
+import stripe
 from fastapi import APIRouter, Depends, HTTPException, Request, Header
 from fastapi.responses import RedirectResponse
 from ipaddress import ip_address
@@ -23,11 +24,12 @@ from app.services.elavon_converge import (
     converge_invoice_number,
     converge_state_code,
     create_converge_hpp_token,
-    query_converge_transaction,
-    search_converge_by_invoice,
 )
 
 router = APIRouter()
+
+if settings.STRIPE_SECRET_KEY:
+    stripe.api_key = settings.STRIPE_SECRET_KEY
 
 def normalize_address(address: Optional[str]) -> str:
     return " ".join((address or "").split())
@@ -716,65 +718,6 @@ async def stripe_webhook(request: Request, stripe_signature: str = Header(None))
     return {"status": "success"}
 
 
-async def reconcile_converge_order_by_invoice(local_order_id: str) -> dict:
-    """Ask Converge for the real status of an order using OUR invoice number, then
-    reconcile the local order and Spire. This does not depend on the browser return
-    (which can arrive empty), so an approved payment is never lost."""
-    invoice = converge_invoice_number(local_order_id)
-    txns = await search_converge_by_invoice(invoice)
-    print(f"[CONVERGE-RECONCILE] order={local_order_id or '-'} invoice={invoice or '-'} "
-          f"found={len(txns)} transaction(s)")
-    if not txns:
-        return {"status": "not_found", "invoice": invoice}
-
-    # Prefer an approved transaction; otherwise fall back to the last result we saw.
-    approved = next((t for t in txns if t.get("status") == "APPROVED"), None)
-    chosen = approved or txns[-1]
-    txn_id = _clean_str(chosen.get("ssl_txn_id"))
-    candidates = [local_order_id, invoice, txn_id]
-
-    if chosen.get("status") == "APPROVED":
-        print(f"[CONVERGE-RECONCILE] APPROVED txn={txn_id or '-'} -> confirming order")
-        await update_local_order_status_by_candidates(
-            candidates, "Payment Confirmed", {"converge_txn_id": txn_id}
-        )
-        confirmed_order = await find_local_order_by_candidates(candidates)
-        if confirmed_order:
-            try:
-                await finalize_confirmed_order_in_spire(confirmed_order, str(txn_id))
-            except Exception as exc:
-                import traceback
-                print(f"[CONVERGE-RECONCILE] !! Spire finalize FAILED: {exc!r}")
-                print(traceback.format_exc())
-        else:
-            print(f"[CONVERGE-RECONCILE] !! approved but NO local order matched "
-                  f"candidates={[c for c in candidates if c]}")
-        return {"status": "approved", "txn_id": txn_id, "invoice": invoice,
-                "avs": chosen.get("ssl_avs_response"), "cvv2": chosen.get("ssl_cvv2_response")}
-
-    message = chosen.get("ssl_result_message") or "Transaction declined"
-    print(f"[CONVERGE-RECONCILE] DECLINED txn={txn_id or '-'} message={message!r} "
-          f"avs={chosen.get('ssl_avs_response')!r} cvv2={chosen.get('ssl_cvv2_response')!r}")
-    await update_local_order_status_by_candidates(
-        candidates, "Payment Failed",
-        {"converge_txn_id": txn_id, "error_message": message},
-    )
-    return {"status": "declined", "txn_id": txn_id, "message": message, "invoice": invoice,
-            "avs": chosen.get("ssl_avs_response"), "cvv2": chosen.get("ssl_cvv2_response")}
-
-
-def _clean_str(value) -> str:
-    return str(value or "").strip()
-
-
-@router.post("/reconcile/{local_order_id}")
-async def reconcile_payment(local_order_id: str):
-    """Reconcile a payment by invoice number. The frontend success page (which still
-    knows its own order id even when the Converge return came back empty) calls this to
-    make sure an approved payment is captured and a declined one is marked failed."""
-    return await reconcile_converge_order_by_invoice(local_order_id)
-
-
 def _mask_converge_params(params: dict) -> dict:
     """Redact secrets before logging. AVS/CVV *response* codes are kept on purpose —
     they are result indicators (M/N/etc.), not the cardholder's CVV, and we need them."""
@@ -846,80 +789,46 @@ async def converge_return(request: Request):
             continue
         print(f"[CONVERGE-RETURN]   {key} = {params[key]!r}")
 
-    # The browser-facing result is useful, but txnquery is authoritative. This also
-    # covers the rare case where the hosted page reports a stale/ambiguous result after
-    # the processor has already recorded an approval.
-    if txn_id:
-        print(f"[CONVERGE-RETURN] running txnquery for txn={txn_id} ...")
-        verified = await query_converge_transaction(txn_id)
-        verified_state = str((verified or {}).get("status") or "").upper()
-        print(f"[CONVERGE-RETURN] txnquery verified_state={verified_state or 'NONE'} "
-              f"result={(verified or {}).get('ssl_result')!r} "
-              f"message={(verified or {}).get('ssl_result_message')!r} "
-              f"avs={(verified or {}).get('ssl_avs_response')!r} "
-              f"cvv2={(verified or {}).get('ssl_cvv2_response')!r} "
-              f"issuer={(verified or {}).get('ssl_issuer_response')!r} "
-              f"approval={(verified or {}).get('ssl_approval_code')!r}")
-        if verified_state == "APPROVED":
-            ssl_result = "0"
-            message = (verified or {}).get("ssl_result_message") or "APPROVAL"
-            verified_txn_id = (verified or {}).get("ssl_txn_id") or txn_id
-            candidates = [local_order_id, params.get("ssl_invoice_number"), verified_txn_id]
-            print(f"[CONVERGE-RETURN] APPROVED -> reconciling "
-                  f"candidates={[c for c in candidates if c]}")
-            await update_local_order_status_by_candidates(
-                candidates,
-                "Payment Confirmed",
-                {"converge_txn_id": verified_txn_id},
-            )
-            confirmed_order = await find_local_order_by_candidates(candidates)
-            if confirmed_order:
-                print(f"[CONVERGE-RETURN] matched order id={confirmed_order.get('id')!r} "
-                      f"-> finalizing in Spire")
-                try:
-                    result = await finalize_confirmed_order_in_spire(
-                        confirmed_order, str(verified_txn_id)
-                    )
-                    print(f"[CONVERGE-RETURN] Spire finalize result={result!r}")
-                except Exception as exc:
-                    import traceback
-                    print(f"[CONVERGE-RETURN] !! Spire finalize FAILED: {exc!r}")
-                    print(traceback.format_exc())
-            else:
-                print(f"[CONVERGE-RETURN] !! NO local order matched "
-                      f"candidates={[c for c in candidates if c]} — order will NOT be finalized")
-        elif verified_state == "DECLINED":
-            ssl_result = str((verified or {}).get("ssl_result") or ssl_result or "1")
-            message = (verified or {}).get("ssl_result_message") or message or "Transaction declined"
-            candidates = [local_order_id, params.get("ssl_invoice_number"), txn_id]
-            print(f"[CONVERGE-RETURN] DECLINED -> marking Payment Failed "
-                  f"candidates={[c for c in candidates if c]} message={message!r}")
-            await update_local_order_status_by_candidates(
-                candidates,
-                "Payment Failed",
-                {"converge_txn_id": txn_id, "error_message": message},
-            )
+    # No XML API. We trust the result Converge posts back on the redirect: on an approval
+    # the REDG receipt link carries ssl_result=0 + ssl_txn_id, which is all we need to
+    # confirm the order and push it into Spire.
+    candidates = [local_order_id, params.get("ssl_invoice_number"), txn_id]
+    clean_candidates = [c for c in candidates if c]
+    if ssl_result == "0":
+        message = message or "APPROVAL"
+        print(f"[CONVERGE-RETURN] APPROVED (ssl_result=0) -> confirming "
+              f"candidates={clean_candidates}")
+        await update_local_order_status_by_candidates(
+            candidates, "Payment Confirmed", {"converge_txn_id": txn_id}
+        )
+        confirmed_order = await find_local_order_by_candidates(candidates)
+        if confirmed_order:
+            print(f"[CONVERGE-RETURN] matched order id={confirmed_order.get('id')!r} "
+                  f"-> finalizing in Spire")
+            try:
+                result = await finalize_confirmed_order_in_spire(confirmed_order, str(txn_id))
+                print(f"[CONVERGE-RETURN] Spire finalize result={result!r}")
+            except Exception as exc:
+                import traceback
+                print(f"[CONVERGE-RETURN] !! Spire finalize FAILED: {exc!r}")
+                print(traceback.format_exc())
         else:
-            print(f"[CONVERGE-RETURN] !! txnquery returned unrecognized "
-                  f"state={verified_state!r} — leaving browser result as-is")
-    elif local_order_id:
-        # No ssl_txn_id (e.g. the empty decline POST), but we know the order — reconcile
-        # by invoice number so an approved payment is still captured.
-        print(f"[CONVERGE-RETURN] no ssl_txn_id but order={local_order_id} -> "
-              "reconciling by invoice number")
-        recon = await reconcile_converge_order_by_invoice(local_order_id)
-        if recon.get("status") == "approved":
-            ssl_result = "0"
-            txn_id = recon.get("txn_id") or txn_id
-            message = "APPROVAL"
-        elif recon.get("status") == "declined":
-            ssl_result = ssl_result or "1"
-            message = recon.get("message") or message or "Transaction declined"
+            print(f"[CONVERGE-RETURN] !! approved but NO local order matched "
+                  f"candidates={clean_candidates} — order will NOT be finalized")
+    elif ssl_result:
+        # A real, explicit decline result.
+        message = message or "Transaction declined"
+        print(f"[CONVERGE-RETURN] DECLINED (ssl_result={ssl_result}) message={message!r} "
+              f"avs={params.get('ssl_avs_response', '-')!r} cvv2={params.get('ssl_cvv2_response', '-')!r}")
+        await update_local_order_status_by_candidates(
+            candidates, "Payment Failed",
+            {"converge_txn_id": txn_id, "error_message": message},
+        )
     else:
-        print("[CONVERGE-RETURN] !! no ssl_txn_id AND no order id present -> cannot "
-              "identify the transaction. The account 'Redirect URL' posts empty; use the "
-              "Approval/Decline Button Link with 'Include Original Post Data', or the "
-              "frontend /reconcile/{order} call.")
+        # Empty return (no ssl_result) — typically the decline "Return to Merchant" POST,
+        # which carries no data. Nothing to confirm; leave the order as-is for retry.
+        print("[CONVERGE-RETURN] !! empty return (no ssl_result) — cannot confirm a "
+              "payment. Order left as-is; the customer can retry.")
 
     frontend_url = settings.FRONTEND_URLS.split(",")[0].strip().rstrip("/")
     query = urlencode({
@@ -933,3 +842,196 @@ async def converge_return(request: Request):
     print("=" * 70)
     # CheckoutSuccess handles both approved (ssl_result == "0") and declined/cancelled.
     return RedirectResponse(url=redirect_target, status_code=303)
+
+
+# ---------------------------------------------------------------------------
+# Stripe Checkout — live card payments
+# ---------------------------------------------------------------------------
+
+async def _compute_order_totals(request: "PaymentIntentRequest", current_user) -> dict:
+    """Recompute the authoritative order total (subtotal + shipping + tax) server-side,
+    mirroring create_payment_intent so the charged amount can't be tampered with."""
+    subtotal = items_total(request.items or [])
+    shipping_settings = await get_customer_shipping_settings(current_user)
+    free_delivery = shipping_settings["free_delivery"]
+    shipping_details = request.shipping_address_details or {}
+    shipping_postal_code = first_non_empty(
+        shipping_details.get("postal_code"),
+        shipping_details.get("postalCode"),
+        shipping_details.get("zip"),
+        getattr(current_user, "zip", ""),
+    )
+    freightcom_shipping_cost = None
+    if requires_freightcom_quote(
+        shipping_postal_code, request.shipping_method,
+        free_delivery=free_delivery, ship_code=shipping_settings["ship_code"],
+    ):
+        freightcom_shipping_cost = await quote_freightcom_shipping(
+            shipping_postal_code, request.items or [], subtotal,
+        )
+    shipping_breakdown = calculate_shipping_breakdown(
+        subtotal, request.items or [], request.shipping_method,
+        free_delivery=free_delivery, ship_code=shipping_settings["ship_code"],
+        postal_code=shipping_postal_code, freightcom_shipping_cost=freightcom_shipping_cost,
+    )
+    shipping_cost = shipping_breakdown["shipping_cost"]
+    tax_amount = round_money(request.tax_amount)
+    amount = round_money(request.amount)
+    if subtotal > 0:
+        expected_amount = round_money(subtotal + shipping_cost + tax_amount)
+        if free_delivery or str(request.shipping_method or "").lower() == "pickup":
+            amount = expected_amount
+        elif amount < expected_amount:
+            amount = expected_amount
+    return {"amount": amount, "shipping_cost": shipping_cost, "tax_amount": tax_amount}
+
+
+@router.post("/create-checkout-session")
+async def create_checkout_session(
+    request: PaymentIntentRequest,
+    http_request: Request,
+    current_user: Optional[UserInDB] = Depends(get_optional_current_user),
+):
+    """Create a Stripe Checkout Session and return its hosted URL. The order is snapshotted
+    as 'Payment Pending'; the Stripe webhook confirms it and pushes it into Spire once the
+    payment succeeds."""
+    if not settings.STRIPE_SECRET_KEY:
+        raise HTTPException(status_code=503, detail="Stripe is not configured")
+
+    local_order_id = request.order_id or f"web_{uuid4().hex[:12]}"
+    totals = await _compute_order_totals(request, current_user)
+    amount = totals["amount"]
+    if amount <= 0:
+        raise HTTPException(status_code=400, detail="Invalid order amount")
+
+    frontend_url = settings.FRONTEND_URLS.split(",")[0].strip().rstrip("/")
+    currency = (settings.STRIPE_CURRENCY or "cad").lower()
+    now = datetime.utcnow().isoformat()
+
+    db = require_database()
+    local_order = {
+        "id": local_order_id,
+        "local_order_id": local_order_id,
+        "payment_session_id": local_order_id,
+        "customer_email": request.customer_email,
+        "total_amount": amount,
+        "items": request.items,
+        "shipping_address": normalize_address(request.shipping_address) or None,
+        "shipping_address_details": request.shipping_address_details,
+        "shipping_method": request.shipping_method,
+        "ship_to_code": (request.ship_to_code or "").strip() or None,
+        "ship_to_name": (request.ship_to_name or "").strip() or None,
+        "billing_address": normalize_address(request.billing_address) or None,
+        "billing_address_details": request.billing_address_details,
+        "po_number": (request.po_number or "").strip() or None,
+        "order_notes": (request.order_notes or "").strip() or None,
+        "free_tshirt_size": (request.free_tshirt_size or "").strip() or None,
+        "shipping_cost": totals["shipping_cost"],
+        "tax_amount": totals["tax_amount"],
+        "status": "Payment Pending",
+        "provider": "Stripe",
+    }
+    await db["orders"].update_one(
+        {"id": local_order_id},
+        {"$set": local_order, "$setOnInsert": {"created_at": now, "spire_order_no": None}},
+        upsert=True,
+    )
+
+    try:
+        session = stripe.checkout.Session.create(
+            mode="payment",
+            line_items=[{
+                "price_data": {
+                    "currency": currency,
+                    "product_data": {"name": f"Action Sanitation order {local_order_id}"},
+                    "unit_amount": int(round(amount * 100)),
+                },
+                "quantity": 1,
+            }],
+            customer_email=request.customer_email or None,
+            client_reference_id=local_order_id,
+            metadata={"local_order_id": local_order_id},
+            payment_intent_data={"metadata": {"local_order_id": local_order_id}},
+            success_url=(
+                f"{frontend_url}/checkout/success?provider=stripe"
+                f"&session_id={{CHECKOUT_SESSION_ID}}&local_order_id={local_order_id}"
+            ),
+            cancel_url=f"{frontend_url}/checkout?canceled=1",
+        )
+    except Exception as exc:
+        print(f"[STRIPE] create session FAILED order={local_order_id} error={exc!r}")
+        raise HTTPException(status_code=502, detail="Could not start Stripe checkout")
+
+    await db["orders"].update_one(
+        {"id": local_order_id},
+        {"$set": {"stripe_session_id": session.id, "updated_at": now}},
+    )
+    print(f"[STRIPE] checkout session={session.id} order={local_order_id} "
+          f"amount={amount:.2f} {currency}")
+    return {
+        "paymentSessionUrl": session.url,
+        "localOrderId": local_order_id,
+        "paymentSessionId": local_order_id,
+    }
+
+
+@router.post("/stripe-webhook")
+async def stripe_webhook_v2(request: Request, stripe_signature: str = Header(None)):
+    """Stripe webhook. Verifies the signature and, on a completed checkout, confirms the
+    local order and pushes it into Spire. This is the source of truth for a paid order."""
+    payload = await request.body()
+    if settings.STRIPE_WEBHOOK_SECRET:
+        try:
+            event = stripe.Webhook.construct_event(
+                payload, stripe_signature, settings.STRIPE_WEBHOOK_SECRET
+            )
+        except Exception as exc:
+            print(f"[STRIPE-WEBHOOK] signature verification FAILED: {exc!r}")
+            raise HTTPException(status_code=400, detail="Invalid signature")
+    else:
+        import json
+        event = json.loads(payload.decode("utf-8", "replace") or "{}")
+
+    event_type = event["type"]
+    data_object = event["data"]["object"]
+    print(f"[STRIPE-WEBHOOK] type={event_type}")
+
+    if event_type == "checkout.session.completed":
+        session = data_object
+        local_order_id = (session.get("metadata") or {}).get("local_order_id") \
+            or session.get("client_reference_id")
+        payment_intent = session.get("payment_intent")
+        paid = session.get("payment_status") == "paid"
+        candidates = [local_order_id, payment_intent, session.get("id")]
+        print(f"[STRIPE-WEBHOOK] checkout.session.completed order={local_order_id} "
+              f"pi={payment_intent} paid={paid}")
+        if paid:
+            await update_local_order_status_by_candidates(
+                candidates, "Payment Confirmed",
+                {"stripe_payment_intent_id": payment_intent,
+                 "stripe_session_id": session.get("id")},
+            )
+            confirmed_order = await find_local_order_by_candidates(candidates)
+            if confirmed_order:
+                try:
+                    await finalize_confirmed_order_in_spire(
+                        confirmed_order, str(payment_intent or session.get("id"))
+                    )
+                except Exception as exc:
+                    import traceback
+                    print(f"[STRIPE-WEBHOOK] !! Spire finalize FAILED: {exc!r}")
+                    print(traceback.format_exc())
+            else:
+                print(f"[STRIPE-WEBHOOK] !! no local order matched "
+                      f"candidates={[c for c in candidates if c]}")
+
+    elif event_type == "checkout.session.expired":
+        session = data_object
+        local_order_id = (session.get("metadata") or {}).get("local_order_id") \
+            or session.get("client_reference_id")
+        await update_local_order_status_by_candidates(
+            [local_order_id, session.get("id")], "Payment Failed",
+            {"error_message": "Checkout session expired"},
+        )
+
+    return {"status": "ok"}

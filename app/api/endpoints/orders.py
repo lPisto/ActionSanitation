@@ -15,9 +15,12 @@ from app.services.shipping_rules import calculate_shipping_breakdown, requires_f
 from app.services.elavon_converge import query_converge_transaction
 import json
 import httpx
+import stripe
 import xml.etree.ElementTree as ET
 
 router = APIRouter()
+if settings.STRIPE_SECRET_KEY:
+    stripe.api_key = settings.STRIPE_SECRET_KEY
 COD_PAYMENT_METHODS = {"on_account", "cod", "cash_on_delivery"}
 DIRECT_ORDER_PAYMENT_METHODS = COD_PAYMENT_METHODS | {"e_transfer"}
 
@@ -842,9 +845,36 @@ async def create_order(order: OrderCreate, current_user: UserInDB = Depends(get_
     if money["total_amount"] < expected_total:
         money["total_amount"] = expected_total
 
-    # 1. Validate Converge Transaction (unless On Account)
+    # 1. Validate the payment (unless On Account / E-Transfer).
     if order.payment_method in DIRECT_ORDER_PAYMENT_METHODS:
-        # Skip Converge validation for On Account and E-Transfer orders.
+        # Skip gateway validation for On Account and E-Transfer orders.
+        total_amount = money["total_amount"]
+    elif (existing_order or {}).get("provider") == "Stripe":
+        # Stripe payment. It's confirmed if the signed webhook already flipped the order,
+        # OR — so we don't depend on a webhook reaching us (esp. on localhost) — we ask
+        # Stripe directly whether the Checkout Session was paid.
+        stripe_confirmed = (existing_order or {}).get("status") in (
+            "Payment Confirmed", "Payment Confirmed - ERP Pending", "Paid"
+        )
+        if not stripe_confirmed:
+            session_id = existing_order.get("stripe_session_id")
+            try:
+                if session_id and stripe.api_key:
+                    sess = stripe.checkout.Session.retrieve(session_id)
+                    if getattr(sess, "payment_status", None) == "paid":
+                        stripe_confirmed = True
+                        await db["orders"].update_one(
+                            {"_id": existing_order["_id"]},
+                            {"$set": {
+                                "status": "Payment Confirmed",
+                                "stripe_payment_intent_id": sess.get("payment_intent"),
+                                "updated_at": datetime.utcnow().isoformat(),
+                            }},
+                        )
+            except Exception as exc:
+                print(f"[STRIPE] session verify failed order={existing_order.get('id')}: {exc!r}")
+        if not stripe_confirmed:
+            raise HTTPException(status_code=409, detail="Payment is still pending confirmation. Please wait a moment.")
         total_amount = money["total_amount"]
     else:
         payment_txn_id = order.stripe_payment_intent_id or (existing_order or {}).get("converge_txn_id")
